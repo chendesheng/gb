@@ -1,0 +1,6 @@
+cabal clean
+cabal test \
+  --enable-profiling \
+  --enable-library-profiling \
+  --enable-executable-profiling \
+  --test-options='+RTS -xc -RTS'

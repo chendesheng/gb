@@ -201,7 +201,7 @@ executeInstruction cpu op = do
     DEC_r8 r8 -> do
       val <- readR8 regs bus r8
       let val' = val - 1
-      regs' <- writeR8 regs bus r8 $ val'
+      regs' <- writeR8 regs bus r8 val'
       return
         ( cpu
             { registers =

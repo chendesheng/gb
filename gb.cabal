@@ -59,7 +59,7 @@ library gb-lib
     -- Import common warning flags.
     import:           warnings, shared
     ghc-options: -fprof-auto
-    exposed-modules: Instruction, Bus, CPU, PPU, Registers
+    exposed-modules: Instruction, Color, Bus, CPU, PPU, Registers
     other-modules: Dbg
     -- Directories containing source files.
     hs-source-dirs:   src

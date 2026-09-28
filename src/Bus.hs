@@ -13,11 +13,21 @@ module Bus
     writeR8,
     readR16Mem,
     bootRomEnabled,
+    isLcdOn,
+    readLcdC,
+    readLcdY,
+    readLcdYC,
+    readLcdStatus,
+    readSCY,
+    readSCX,
+    readBGPalette,
+    readOBP0Palette,
+    readOBP1Palette,
   )
 where
 
 import Data.Binary.Get (runGet)
-import Data.Bits ((.|.))
+import Data.Bits ((.|.), (.&.), Bits (shiftR))
 import qualified Data.ByteString.Lazy as BL
 import Data.Vector.Unboxed (Vector, (!))
 import qualified Data.Vector.Unboxed as V
@@ -26,6 +36,7 @@ import Data.Word
 import Instruction (Instruction, instructionDecoder)
 import Registers
 import Prelude hiding (length)
+import Color
 
 type Rom = Vector Word8
 
@@ -189,3 +200,42 @@ writeR16 regs r16 val =
         DE -> regs {rD = h, rE = l}
         HL -> regs {rH = h, rL = l}
         SP -> regs {rSP = val}
+
+readLcdC :: Int -> Bus -> IO Bool
+readLcdC index bus = do
+  b <- readByte 0xFF40 bus
+  return $ (b `shiftR` index .&. 0x01) == 1
+
+isLcdOn :: Bus -> IO Bool
+isLcdOn = readLcdC 7
+
+readLcdY :: Bus -> IO Word8
+readLcdY = readByte 0xFF44
+
+readLcdYC :: Bus -> IO Word8
+readLcdYC = readByte 0xFF45
+
+-- writeLcdYC :: Word8 -> Bus -> IO Bus
+-- writeLcdYC = writeByte 0xFF45
+
+readLcdStatus :: Int -> Bus -> IO Bool
+readLcdStatus index bus = do
+  b <- readByte 0xFF41 bus
+  return $ (b `shiftR` index .&. 0x01) == 1
+
+readSCY :: Bus -> IO Word8
+readSCY = readByte 0xFF42
+
+readSCX :: Bus -> IO Word8
+readSCX = readByte 0xFF43
+
+readBGPalette :: Bus -> IO ColorPalette
+readBGPalette = readByte 0xFF47
+
+readOBP0Palette :: Bus -> IO ColorPalette
+readOBP0Palette = readByte 0xFF48
+
+readOBP1Palette :: Bus -> IO ColorPalette
+readOBP1Palette = readByte 0xFF49
+
+

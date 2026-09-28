@@ -59,13 +59,13 @@ library gb-lib
     -- Import common warning flags.
     import:           warnings, shared
     ghc-options: -fprof-auto
-    exposed-modules: Instruction, Bus, CPU, Registers
+    exposed-modules: Instruction, Bus, CPU, PPU, Registers
     other-modules: Dbg
     -- Directories containing source files.
     hs-source-dirs:   src
 
     -- Test dependencies.
-    build-depends:    base ^>=4.18.3.0, bytestring, binary, vector
+    build-depends:    base ^>=4.21.0.0, bytestring, binary, vector, split
 
 test-suite gb-test
     -- Import common warning flags.
@@ -89,7 +89,7 @@ test-suite gb-test
     main-is:          Spec.hs
 
     -- Test dependencies.
-    build-depends:    base ^>=4.18.3.0, hspec, binary, bytestring, gb:gb-lib
+    build-depends:    base ^>=4.21.0.0, hspec, binary, bytestring, gb:gb-lib
 
 
     build-tool-depends:

@@ -1,6 +1,6 @@
 module CPUSpec (spec) where
 
-import Bus (Bus (..))
+import Bus (Bus (..), bootRomEnabled)
 import CPU (CPU (..), execute, execute1, initCPU)
 import Data.ByteString.Lazy as BL
 import Data.Word
@@ -32,8 +32,8 @@ testCPU = do
           ++ zeros (0x8000 - 0x014E)
 {- ORMOLU_ENABLE -}
 
-isBooted :: CPU -> Bool
-isBooted cpu = not cpu.bus.bootRomEnabled
+isBooted :: CPU -> IO Bool
+isBooted cpu = not <$> bootRomEnabled cpu.bus
 
 spec :: SpecWith ()
 spec = describe "CPU" $ do

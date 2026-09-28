@@ -1,6 +1,6 @@
 module Bus
   ( Address,
-    Bus(..),
+    Bus (..),
     fetchInstruction,
     initBus,
     readByte,
@@ -12,10 +12,12 @@ module Bus
     writeR16,
     writeR8,
     readR16Mem,
+    bootRomEnabled,
   )
 where
 
 import Data.Binary.Get (runGet)
+import Data.Bits ((.|.))
 import qualified Data.ByteString.Lazy as BL
 import Data.Vector.Unboxed (Vector, (!))
 import qualified Data.Vector.Unboxed as V
@@ -42,7 +44,6 @@ type Address = Word16
 
 data Bus = Bus
   { boot :: Rom,
-    bootRomEnabled :: Bool,
     cartridge :: Rom,
     vram :: Ram,
     wram :: Ram,
@@ -61,7 +62,6 @@ initBus boot cartridge = do
   return
     Bus
       { boot = byteStringToVector boot,
-        bootRomEnabled = True,
         cartridge = byteStringToVector cartridge,
         vram,
         wram,
@@ -70,10 +70,19 @@ initBus boot cartridge = do
         io
       }
 
+readByte0xFF50 :: Bus -> IO Word8
+readByte0xFF50 bus =  MV.read bus.io 0x50
+
+bootRomEnabled :: Bus -> IO Bool
+bootRomEnabled bus = do
+  b <- readByte0xFF50 bus
+  return $ b == 0
+ 
 readByte :: Address -> Bus -> IO Word8
 readByte addr bus
-  | addr < 0x0100 && bus.bootRomEnabled =
-      return $ readRom addr bus.boot
+  | addr < 0x0100 = do
+      enabled <- bootRomEnabled bus
+      return $ readRom addr (if enabled then bus.boot else bus.cartridge)
   | addr < 0x8000 =
       return $ readRom addr bus.cartridge
   | 0x8000 <= addr && addr < 0xA000 =
@@ -109,9 +118,11 @@ writeByte addr val bus
   | 0xFE00 <= addr && addr < 0xFEA0 = do
       writeRam (addr - 0xFE00) val bus.oam
       return bus
-  | 0xFF50 == addr && val /= 0 =
+  | 0xFF50 == addr = do
       -- 0xFF50 disables boot ROM
-      return bus {bootRomEnabled = False}
+      b <- readByte0xFF50 bus
+      writeRam 0x50 (val .|. b) bus.io
+      return bus
   | 0xFF00 <= addr && addr < 0xFF80 = do
       writeRam (addr - 0xFF00) val bus.io
       return bus

@@ -40,9 +40,10 @@ advancePC :: Int8 -> Registers -> Registers
 advancePC imm8 regs =
   regs {rPC = advanceAddr regs.rPC imm8}
 
-execute :: (CPU -> Bool) -> CPU -> IO CPU
-execute endPred cpu =
-  if endPred cpu
+execute :: (CPU -> IO Bool) -> CPU -> IO CPU
+execute endPred cpu = do
+  end <- endPred cpu
+  if end
     then return cpu
     else do
       cpu1 <- execute1 cpu

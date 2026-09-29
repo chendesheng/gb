@@ -11,7 +11,7 @@ import Data.Bits (shiftR, (.&.))
 import Data.Word
 
 data ColorIndex = ID0 | ID1 | ID2 | ID3
-data Color = White | LightGray | DarkGray | Black deriving (Enum, Show)
+data Color = Blank | LightGray | DarkGray | Black deriving (Enum, Show)
 
 type ColorPalette = Word8
 

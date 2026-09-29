@@ -1,0 +1,14 @@
+## TODO
+- PPU modes
+  - status registers
+  - fetcher
+  - drawing
+  - visual rendering (raylib)
+- Interruption
+  - VBlank
+  - STAT
+  - Input
+  - Timer
+  - Serial
+- more CPU instructions
+- DMA transfer

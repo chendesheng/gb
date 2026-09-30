@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 module PPU (execute, FIFOPixel(..), PPU(..), initPPU) where
 
 import Prelude hiding (replicate)
@@ -125,7 +126,7 @@ step ppu = do
       pos <- readOAMEntry i ppu.bus
       let mode = OAMScan (Just $ SelectedOAMObject i pos)
       let selected = if i == 0 then mempty else ppu.selectedOAMObjects
-      return $ ppu{x=ppu.x+1, mode=mode, selectedOAMObjects=selected}
+      return $ ppu{mode=mode, selectedOAMObjects=selected}
     OAMScan (Just pending) -> do
       -- `LY` falls within `[Y - 16, Y - 16 + height)`
       height <- readLcdCObjSize bus
@@ -137,31 +138,34 @@ step ppu = do
                         modify sort ppu.selectedOAMObjects
 
       let mode = if ppu.x == 79 then initDrawingPixels else OAMScan Nothing
-      return $ ppu{x=ppu.x+1, mode=mode, selectedOAMObjects=selected}
+      return $ ppu{mode=mode, selectedOAMObjects=selected}
     DrawingPixels fetcherStep fetcherX screenX oam bg -> do
       bgEnable <- isLcdCBgEnable bus
       if bgEnable then do
-        ppu' <- executeFetcherStep
-        case ppu'.mode of
-          DrawingPixels a b screenX' d bg' ->
-            case dequeue bg' of
-              Just (pixel, bg'') -> do
-                palette <- readBGPalette bus
-                let color = getColor pixel.color palette
-                let display' = renderPixel ppu'.y screenX' color ppu'.display 
-                let screenX'' = screenX' + 1
-                if screenX'' == 160 then
-                  return ppu'{x=ppu'.x+1, mode=HorizontalBlank, display=display'}
-                else
-                  return ppu'{x=ppu'.x+1, mode=DrawingPixels a b screenX'' d bg'', display=display'}
-              _ ->
-                return ppu'{x=ppu'.x+1}
-          _ -> return ppu'{x=ppu'.x+1}
+        ppu' <- executeFetcherStep ppu
+        render ppu'
       else
         -- TODO
-        return ppu{x=ppu.x+1}
+        return ppu
       where
-        executeFetcherStep=
+        render ppu = 
+            case ppu.mode of
+              DrawingPixels a b screenX d bg ->
+                case dequeue bg of
+                  Just (pixel, bg') -> do
+                    palette <- readBGPalette bus
+                    let color = getColor pixel.color palette
+                    let display' = renderPixel ppu.y screenX color ppu.display 
+                    let screenX' = screenX + 1
+                    if screenX' == 160 then
+                      return ppu{mode=HorizontalBlank, display=display'}
+                    else
+                      return ppu{mode=DrawingPixels a b screenX' d bg', display=display'}
+                  _ ->
+                    return ppu
+              _ -> return ppu
+
+        executeFetcherStep ppu =
             case fetcherStep of
               GetTileIndex 1 -> do
                 -- TODO
@@ -187,30 +191,24 @@ step ppu = do
                 return ppu{mode=DrawingPixels (Sleep 1 tileRow) fetcherX screenX oam bg} 
               Push tileRow ->
                 if isEmpty bg then do
-                  let bg' = foldl (\acc colorIndex -> enqueue (FIFOPixel colorIndex 0 0) acc) bg (tileRowColorIndexes tileRow)
+                  let bg' = foldl' (\acc colorIndex -> enqueue (FIFOPixel colorIndex 0 0) acc) bg (tileRowColorIndexes tileRow)
                   return ppu{mode=DrawingPixels (GetTileIndex 0) (fetcherX + 1) screenX oam bg'}
                 else
                   -- TODO: move to HorizontalBlank mode
                   return ppu{mode=DrawingPixels (Push tileRow) fetcherX screenX oam bg} 
     HorizontalBlank ->
-      let ppu' = advanceXY ppu
-          x = ppu'.x
-          y = ppu'.y
-      in return $
-          if y < 144 && x == 0 then ppu'{mode=OAMScan Nothing}
-          else if y == 144 && x == 0 then ppu'{mode=VerticalBlank}
-          else ppu'
+      return ppu
       
     VerticalBlank -> 
-      let ppu' = advanceXY ppu
-      in return $
-        if ppu'.y == 0 then ppu'{mode=OAMScan Nothing}
-        else ppu'
+      return ppu
 
 advanceXY :: PPU -> PPU
 advanceXY ppu
-  | ppu.x == 455 = ppu{x = 0, y = if ppu.y == 153 then 0 else ppu.y + 1}
-  | otherwise    = ppu{x = ppu.x + 1}
+  | ppu.x == 455 =
+    let y = if ppu.y == 153 then 0 else ppu.y + 1
+        mode = if y < 144 then OAMScan Nothing else VerticalBlank
+    in ppu{x=0, y=y, mode=mode}
+  | otherwise = ppu{x=ppu.x+1}
 
 readBgTileIndex :: Word8 -> Word8 -> Bus -> IO TileIndex
 readBgTileIndex ly x bus = do
@@ -238,8 +236,9 @@ execute duration ppu = do
       return ppu{y=0, x=0, lcdOn=False}
     (False, False) -> return ppu
     (True, True) -> do
-      ppu' <- step ppu
-      ppu'' <- syncPPUToBus ppu'
-      execute (duration - 1) ppu''
+      ppu1 <- step ppu
+      let ppu2 = advanceXY ppu1
+      ppu3 <- syncPPUToBus ppu2
+      execute (duration - 1) ppu3
 
 

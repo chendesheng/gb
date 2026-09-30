@@ -1,38 +1,48 @@
-module PPU (execute, FIFOPixel(..), PixelFIFO(..), PPU(..), initPPU) where
+module PPU (execute, FIFOPixel(..), PPU(..), initPPU) where
 
 import Prelude hiding (replicate)
 import Bus
 import Color
-import Data.Vector (Vector, replicate, toList)
+import Data.Vector (Vector, replicate, toList, snoc, modify, (//), (!))
+import Data.Vector.Algorithms.Intro (sort)
 import Data.Word
+import Queue hiding (toList)
 
-type Pixel = Color
 
 -- One dot = one PPU clock. One scanline = 456 dots. One frame = 154 lines = 70224 dots.
 
 -- 160*144
-newtype Display = Display (Vector (Vector Pixel))
+newtype Display = Display (Vector (Vector Color))
 
 initDisplay :: Display
 initDisplay = Display (replicate 144 (replicate 160 Blank))
 
+renderPixel :: Word8 -> Word8 -> Color -> Display -> Display
+renderPixel y x color (Display rows) =
+  let y' = fromIntegral y
+      row = rows ! y'
+      x' = fromIntegral x
+      row' = row // [(x', color)]
+  in
+  Display $ rows // [(y', row')]
+
 data FIFOPixel = FIFOPixel
-  { color :: ColorIndex, -- 0 - 3
-    palette :: Int, -- 0 - 7
-    spritePriority :: Int,
-    backgroundPriority :: Int
+  { color :: ColorIndex -- 0 - 3
+  , palette :: Int -- 0 - 7
+  -- , spritePriority :: Int -- not used for DMG
+  , backgroundPriority :: Int
   }
 
-data PixelFIFO = PixelFIFO {oam :: [FIFOPixel], background :: [FIFOPixel]}
+-- data PixelFIFO = PixelFIFO {oam :: [FIFOPixel], background :: [FIFOPixel]}
 
 instance Show Display where
   show (Display pixels) =
     unlines $ toList $ fmap showRow pixels
     where
-      showRow :: Vector Pixel -> String
+      showRow :: Vector Color -> String
       showRow = toList . fmap showPixel
 
-      showPixel :: Pixel -> Char
+      showPixel :: Color -> Char
       showPixel Blank = 'W'
       showPixel LightGray = 'L'
       showPixel DarkGray = 'D'
@@ -50,17 +60,26 @@ data PPU = PPU
   , mode :: PPUMode
   , lcdOn :: Bool
   , display :: Display
-  , selectedOAMObjects :: [SelectedOAMObject] -- up to 10, reversed
+  , selectedOAMObjects :: Vector SelectedOAMObject -- up to 10, reversed
   , bus :: Bus
   }
 
 data SelectedOAMObject = SelectedOAMObject
-  { oamIndex :: Word16
-  , position :: OAMPosition
+  { oamIndex :: Word8
+  , entry :: OAMEntry
   }
 
+instance Eq SelectedOAMObject where
+  (==) a b = a.oamIndex == b.oamIndex
+
+instance Ord SelectedOAMObject where
+  compare a b =
+    case compare a.entry.xPos b.entry.xPos of
+      EQ -> compare a.oamIndex b.oamIndex
+      others -> others
+
 initPPU :: Bus -> PPU
-initPPU = PPU 0 0 HorizontalBlank False initDisplay []
+initPPU = PPU 0 0 HorizontalBlank False initDisplay mempty
 
 -- newtype Tile = Tile (Vector Word8) -- length 16
 
@@ -69,15 +88,31 @@ data PPUMode
   | VerticalBlank
   | OAMScan (Maybe SelectedOAMObject)
   | DrawingPixels
+      { fetcherStep :: FIFOPixelFetcherStep
+      , fetcherX :: Word8
+      , screenX :: Word8
+      , oam :: Queue FIFOPixel
+      , background :: Queue FIFOPixel
+      }
+
+data FIFOPixelFetcherStep
+  = GetTileIndex Int
+  | GetTileDataLow Int TileIndex
+  | GetTileDataHigh Int TileIndex Word8
+  | Sleep Int TileRow
+  | Push TileRow
 
 initOAMScan :: PPUMode
 initOAMScan = OAMScan Nothing
+
+initDrawingPixels :: PPUMode
+initDrawingPixels = DrawingPixels (GetTileIndex 0) 0 0 mempty mempty
 
 toIntMode :: PPUMode -> Word8
 toIntMode HorizontalBlank = 0
 toIntMode VerticalBlank = 1
 toIntMode (OAMScan _) = 2
-toIntMode DrawingPixels = 3
+toIntMode (DrawingPixels {}) = 3
 
 step :: PPU -> IO PPU
 step ppu = do
@@ -86,38 +121,110 @@ step ppu = do
     OAMScan Nothing -> do
       -- even dot
       -- read entry  
-      let i = ppu.x `div` 2
-      pos <- readOAMPosition i ppu.bus
+      let i = fromIntegral ppu.x `div` 2
+      pos <- readOAMEntry i ppu.bus
       let mode = OAMScan (Just $ SelectedOAMObject i pos)
-      let selected = if i == 0 then [] else ppu.selectedOAMObjects
-      syncPPUToBus $ ppu{x=ppu.x+1, mode=mode, selectedOAMObjects=selected}
+      let selected = if i == 0 then mempty else ppu.selectedOAMObjects
+      return $ ppu{x=ppu.x+1, mode=mode, selectedOAMObjects=selected}
     OAMScan (Just pending) -> do
       -- `LY` falls within `[Y - 16, Y - 16 + height)`
-      size <- readLcdC 2 bus
-      let height = if size then 16 else 8
+      height <- readLcdCObjSize bus
       let ly = fromIntegral ppu.y :: Int
-      let y = pending.position.yPos
+      let y = pending.entry.yPos
       let selected = if y - 16 <= ly && ly < y - 16 + height && length ppu.selectedOAMObjects < 10 then
-                        pending : ppu.selectedOAMObjects 
-                    else
-                        ppu.selectedOAMObjects
+                        snoc ppu.selectedOAMObjects pending
+                     else
+                        modify sort ppu.selectedOAMObjects
 
-      let mode = if ppu.x == 79 then DrawingPixels else OAMScan Nothing
-      syncPPUToBus $ ppu{x=ppu.x+1, mode=mode, selectedOAMObjects=selected}
-    _ -> do
-      -- TOOD
+      let mode = if ppu.x == 79 then initDrawingPixels else OAMScan Nothing
+      return $ ppu{x=ppu.x+1, mode=mode, selectedOAMObjects=selected}
+    DrawingPixels fetcherStep fetcherX screenX oam bg -> do
+      bgEnable <- isLcdCBgEnable bus
+      if bgEnable then do
+        ppu' <- executeFetcherStep
+        case ppu'.mode of
+          DrawingPixels a b screenX' d bg' ->
+            case dequeue bg' of
+              Just (pixel, bg'') -> do
+                palette <- readBGPalette bus
+                let color = getColor pixel.color palette
+                let display' = renderPixel ppu'.y screenX' color ppu'.display 
+                let screenX'' = screenX' + 1
+                if screenX'' == 160 then
+                  return ppu'{x=ppu'.x+1, mode=HorizontalBlank, display=display'}
+                else
+                  return ppu'{x=ppu'.x+1, mode=DrawingPixels a b screenX'' d bg'', display=display'}
+              _ ->
+                return ppu'{x=ppu'.x+1}
+          _ -> return ppu'{x=ppu'.x+1}
+      else
+        -- TODO
+        return ppu{x=ppu.x+1}
+      where
+        executeFetcherStep=
+            case fetcherStep of
+              GetTileIndex 1 -> do
+                -- TODO
+                tileIndex <- readBgTileIndex ppu.y (fetcherX * 8) bus
+                return ppu{mode=DrawingPixels (GetTileDataLow 0 tileIndex) fetcherX screenX oam bg} 
+              GetTileIndex _ ->
+                return ppu{mode=DrawingPixels (GetTileIndex 1) fetcherX screenX oam bg} 
+              GetTileDataLow 1 tileIndex -> do
+                scy <- readSCY bus
+                low <- readBgTileRowLow tileIndex (scy + ppu.y) bus
+                return ppu{mode=DrawingPixels (GetTileDataHigh 0 tileIndex low) fetcherX screenX oam bg} 
+              GetTileDataLow _ tileIndex ->
+                return ppu{mode=DrawingPixels (GetTileDataLow 1 tileIndex) fetcherX screenX oam bg} 
+              GetTileDataHigh 1 tileIndex low -> do
+                scy <- readSCY bus
+                high <- readBgTileRowHigh tileIndex (scy + ppu.y) bus
+                return ppu{mode=DrawingPixels (Sleep 0 (low, high)) fetcherX screenX oam bg} 
+              GetTileDataHigh _ tileIndex low -> 
+                return ppu{mode=DrawingPixels (GetTileDataHigh 1 tileIndex low) fetcherX screenX oam bg} 
+              Sleep 1 tileRow ->
+                return ppu{mode=DrawingPixels (Push tileRow) fetcherX screenX oam bg} 
+              Sleep _ tileRow ->
+                return ppu{mode=DrawingPixels (Sleep 1 tileRow) fetcherX screenX oam bg} 
+              Push tileRow ->
+                if isEmpty bg then do
+                  let bg' = foldl (\acc colorIndex -> enqueue (FIFOPixel colorIndex 0 0) acc) bg (tileRowColorIndexes tileRow)
+                  return ppu{mode=DrawingPixels (GetTileIndex 0) (fetcherX + 1) screenX oam bg'}
+                else
+                  -- TODO: move to HorizontalBlank mode
+                  return ppu{mode=DrawingPixels (Push tileRow) fetcherX screenX oam bg} 
+    HorizontalBlank ->
       let ppu' = advanceXY ppu
-      syncPPUToBus ppu'
-
-syncPPUToBus :: PPU -> IO PPU
-syncPPUToBus ppu = do
-  syncPPU ppu.y (toIntMode ppu.mode) ppu.bus
-  return ppu
+          x = ppu'.x
+          y = ppu'.y
+      in return $
+          if y < 144 && x == 0 then ppu'{mode=OAMScan Nothing}
+          else if y == 144 && x == 0 then ppu'{mode=VerticalBlank}
+          else ppu'
+      
+    VerticalBlank -> 
+      let ppu' = advanceXY ppu
+      in return $
+        if ppu'.y == 0 then ppu'{mode=OAMScan Nothing}
+        else ppu'
 
 advanceXY :: PPU -> PPU
 advanceXY ppu
   | ppu.x == 455 = ppu{x = 0, y = if ppu.y == 153 then 0 else ppu.y + 1}
   | otherwise    = ppu{x = ppu.x + 1}
+
+readBgTileIndex :: Word8 -> Word8 -> Bus -> IO TileIndex
+readBgTileIndex ly x bus = do
+  base <- readLcdCBgTileMapArea bus
+  scx <- readSCX bus
+  scy <- readSCY bus
+  let bgY = ly + scy
+  let bgX = x + scx
+  readTileIndex base bgY bgX bus
+
+syncPPUToBus :: PPU -> IO PPU
+syncPPUToBus ppu = do
+  syncPPU ppu.y (toIntMode ppu.mode) ppu.bus
+  return ppu
 
 execute :: Word64 -> PPU -> IO PPU
 execute 0 ppu = return ppu
@@ -131,7 +238,8 @@ execute duration ppu = do
       return ppu{y=0, x=0, lcdOn=False}
     (False, False) -> return ppu
     (True, True) -> do
-      ppu1 <- step ppu
-      execute (duration - 1) ppu1
+      ppu' <- step ppu
+      ppu'' <- syncPPUToBus ppu'
+      execute (duration - 1) ppu''
 
 

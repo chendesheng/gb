@@ -65,7 +65,7 @@ library gb-lib
     hs-source-dirs:   src
 
     -- Test dependencies.
-    build-depends:    base ^>=4.21.0.0, bytestring, binary, vector, split
+    build-depends:    base ^>=4.21.0.0, bytestring, binary, vector, vector-algorithms, split, queues
 
 test-suite gb-test
     -- Import common warning flags.

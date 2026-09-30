@@ -14,6 +14,13 @@ module Bus
     readR16Mem,
     bootRomEnabled,
     isLcdOn,
+    readLcdCBWindowTileMapArea,
+    isLcdCWindowEnable,
+    readLcdCBgTileDataArea,
+    readLcdCBgTileMapArea,
+    readLcdCObjSize,
+    readLcdCObjEnable,
+    isLcdCBgEnable,
     readLcdC,
     readLcdYC,
     readLYCIntSelect,
@@ -29,9 +36,11 @@ module Bus
     readWX,
     syncPPU,
     OAMEntry(..),
-    OAMPosition(..),
     readOAMEntry,
-    readOAMPosition,
+    TileIndex,
+    readTileIndex,
+    readBgTileRowLow,
+    readBgTileRowHigh,
   )
 where
 
@@ -97,7 +106,7 @@ bootRomEnabled :: Bus -> IO Bool
 bootRomEnabled bus = do
   b <- readByte0xFF50 bus
   return $ b == 0
- 
+
 readByte :: Address -> Bus -> IO Word8
 readByte addr bus
   | addr < 0x0100 = do
@@ -255,6 +264,35 @@ readLcdC index bus = do
 isLcdOn :: Bus -> IO Bool
 isLcdOn = readLcdC 7
 
+readLcdCBWindowTileMapArea :: Bus -> IO Address
+readLcdCBWindowTileMapArea bus = do
+  is9C00 <- readLcdC 6 bus
+  return $ if is9C00 then 0x9C00 else 0x9800
+
+isLcdCWindowEnable :: Bus -> IO Bool
+isLcdCWindowEnable = readLcdC 5
+
+readLcdCBgTileDataArea :: Bus -> IO Address
+readLcdCBgTileDataArea bus = do
+  is8000 <- readLcdC 4 bus
+  return $ if is8000 then 0x8000 else 0x8800
+
+readLcdCBgTileMapArea :: Bus -> IO Address
+readLcdCBgTileMapArea bus = do
+  is9C00 <- readLcdC 3 bus
+  return $ if is9C00 then 0x9C00 else 0x9800
+
+readLcdCObjSize :: Bus -> IO Int
+readLcdCObjSize bus = do
+  is8x16 <- readLcdC 2 bus
+  return $ if is8x16 then 16 else 8
+
+readLcdCObjEnable :: Bus -> IO Bool
+readLcdCObjEnable = readLcdC 1
+
+isLcdCBgEnable :: Bus -> IO Bool
+isLcdCBgEnable = readLcdC 0
+
 readLcdY :: Bus -> IO Word8
 readLcdY = readByte 0xFF44
 
@@ -313,47 +351,54 @@ syncPPU ly mode bus = do
   let status' = if ly == lyc then status `setBit` 2 else status `clearBit` 2
   writeRam 0x41 (status' .&. 0xFC .|. mode) bus.io
 
-data TileMapArea = Addr9800 | Addr9C00 deriving (Enum, Show)
-data TileDataArea = Addr8800 | Addr8000 deriving (Enum, Show)
-data ObjSize = ObjSize8x8 | ObjSize8x16 deriving (Enum, Show)
-data LcdC = LcdC
-  { ppuEnable :: Bool
-  , windowTileMapArea :: TileMapArea
-  , windowEnable :: Bool
-  , tileDataArea :: TileDataArea
-  , objSize :: ObjSize
-  , objEnable :: Bool
-  , bgEnable :: Bool
-  }
-
-
 -- TODO: OAM DMA transfer
 -- https://gbdev.io/pandocs/OAM_DMA_Transfer.html
 
 -- OAM read for PPU
 data OAMEntry = OAMEntry
-  { yPos :: Word8
-  , xPos :: Word8
+  { yPos :: Int
+  , xPos :: Int
   , tileIndex :: Word8
   , attributes :: Word8
   }
 
--- position value is signed
-data OAMPosition = OAMPosition { yPos :: Int, xPos :: Int }
-
-readOAMPosition :: Word16 -> Bus -> IO OAMPosition
-readOAMPosition i bus = do
-  let addr = fromIntegral i * 4
-  y <- readRam addr bus.oam
-  x <- readRam (addr + 1) bus.oam
-  return $ OAMPosition (fromIntegral y) (fromIntegral x)
-
-readOAMEntry :: Int -> Bus -> IO OAMEntry
+readOAMEntry :: Word8 -> Bus -> IO OAMEntry
 readOAMEntry i bus = do
   let addr = fromIntegral i * 4
   y <- readRam addr bus.oam
   x <- readRam (addr + 1) bus.oam
   tileIndex <- readRam (addr + 2) bus.oam
   attributes <- readRam (addr + 3) bus.oam
-  return $ OAMEntry y x tileIndex attributes
-  
+  return $ OAMEntry (fromIntegral y) (fromIntegral x) tileIndex attributes
+
+type TileIndex = Word8
+
+readTileIndex :: Address -> Word8 -> Word8 -> Bus -> IO TileIndex
+readTileIndex base y x bus = do
+  let y' = fromIntegral y :: Word16
+  let x' = fromIntegral x :: Word16
+  let addr = base + (y' `div` 8 * 32 + x' `div` 8)
+  readRam (addr - 0x8000) bus.vram
+
+readBgTileRowBaseAddress :: TileIndex -> Word8 -> Bus -> IO Address
+readBgTileRowBaseAddress index y bus = do
+  base <- readLcdCBgTileDataArea bus
+  let addr
+        | base == 0x8000 = base + tileOffset index + rowOffset
+        | index < 128 = 0x9000 + tileOffset index + rowOffset
+        | otherwise = 0x8800 + tileOffset (index - 128) + rowOffset
+  return addr
+  where
+    -- each tile taking 16 bytes
+    tileOffset i = fromIntegral i * 16
+    rowOffset = fromIntegral (y `mod` 8) * 2
+
+readBgTileRowLow :: TileIndex -> Word8 -> Bus -> IO Word8
+readBgTileRowLow index y bus = do
+  addr <- readBgTileRowBaseAddress index y bus
+  readRam (addr - 0x8000) bus.vram
+
+readBgTileRowHigh :: TileIndex -> Word8 -> Bus -> IO Word8
+readBgTileRowHigh index y bus = do
+  addr <- readBgTileRowBaseAddress index y bus
+  readRam (addr + 1 - 0x8000) bus.vram

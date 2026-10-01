@@ -121,7 +121,7 @@ step ppu = do
   case ppu.mode of
     OAMScan Nothing -> do
       -- even dot
-      -- read entry  
+      -- read entry
       let i = fromIntegral ppu.x `div` 2
       pos <- readOAMEntry i ppu.bus
       let mode = OAMScan (Just $ SelectedOAMObject i pos)
@@ -148,7 +148,7 @@ step ppu = do
         -- TODO
         return ppu
       where
-        render ppu = 
+        render ppu =
             case ppu.mode of
               DrawingPixels a b maybeScreenX d bg ->
                 case dequeue bg of
@@ -159,7 +159,7 @@ step ppu = do
                     else do
                       palette <- readBGPalette bus
                       let color = getColor pixel.color palette
-                      let display' = renderPixel ppu.y (fromIntegral screenX) color ppu.display 
+                      let display' = renderPixel ppu.y (fromIntegral screenX) color ppu.display
                       let screenX' = screenX + 1
                       if screenX' == 160 then
                         return ppu{mode=HorizontalBlank, display=display'}
@@ -180,35 +180,35 @@ step ppu = do
               GetTileIndex 1 -> do
                 -- TODO
                 tileIndex <- readBgTileIndex ppu.y (fetcherX * 8) bus
-                return ppu{mode=DrawingPixels (GetTileDataLow 0 tileIndex) fetcherX screenX oam bg} 
+                return ppu{mode=DrawingPixels (GetTileDataLow 0 tileIndex) fetcherX screenX oam bg}
               GetTileIndex _ ->
-                return ppu{mode=DrawingPixels (GetTileIndex 1) fetcherX screenX oam bg} 
+                return ppu{mode=DrawingPixels (GetTileIndex 1) fetcherX screenX oam bg}
               GetTileDataLow 1 tileIndex -> do
                 scy <- readSCY bus
                 low <- readBgTileRowLow tileIndex (scy + ppu.y) bus
-                return ppu{mode=DrawingPixels (GetTileDataHigh 0 tileIndex low) fetcherX screenX oam bg} 
+                return ppu{mode=DrawingPixels (GetTileDataHigh 0 tileIndex low) fetcherX screenX oam bg}
               GetTileDataLow _ tileIndex ->
-                return ppu{mode=DrawingPixels (GetTileDataLow 1 tileIndex) fetcherX screenX oam bg} 
+                return ppu{mode=DrawingPixels (GetTileDataLow 1 tileIndex) fetcherX screenX oam bg}
               GetTileDataHigh 1 tileIndex low -> do
                 scy <- readSCY bus
                 high <- readBgTileRowHigh tileIndex (scy + ppu.y) bus
-                return ppu{mode=DrawingPixels (Sleep 0 (low, high)) fetcherX screenX oam bg} 
-              GetTileDataHigh _ tileIndex low -> 
-                return ppu{mode=DrawingPixels (GetTileDataHigh 1 tileIndex low) fetcherX screenX oam bg} 
+                return ppu{mode=DrawingPixels (Sleep 0 (low, high)) fetcherX screenX oam bg}
+              GetTileDataHigh _ tileIndex low ->
+                return ppu{mode=DrawingPixels (GetTileDataHigh 1 tileIndex low) fetcherX screenX oam bg}
               Sleep 1 tileRow ->
-                return ppu{mode=DrawingPixels (Push tileRow) fetcherX screenX oam bg} 
+                return ppu{mode=DrawingPixels (Push tileRow) fetcherX screenX oam bg}
               Sleep _ tileRow ->
-                return ppu{mode=DrawingPixels (Sleep 1 tileRow) fetcherX screenX oam bg} 
+                return ppu{mode=DrawingPixels (Sleep 1 tileRow) fetcherX screenX oam bg}
               Push tileRow ->
                 if isEmpty bg then do
                   let bg' = foldl' (\acc colorIndex -> enqueue (FIFOPixel colorIndex 0 0) acc) bg (tileRowColorIndexes tileRow)
                   return ppu{mode=DrawingPixels (GetTileIndex 0) (fetcherX + 1) screenX oam bg'}
                 else
-                  return ppu 
+                  return ppu
     HorizontalBlank ->
       return ppu
-      
-    VerticalBlank -> 
+
+    VerticalBlank ->
       return ppu
 
 advanceXY :: PPU -> PPU
@@ -249,5 +249,3 @@ execute duration ppu = do
       let ppu2 = advanceXY ppu1
       ppu3 <- syncPPUToBus ppu2
       execute (duration - 1) ppu3
-
-

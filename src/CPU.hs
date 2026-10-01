@@ -1,5 +1,5 @@
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
-module CPU (CPU (..), execute1, execute, initCPU, executeInstruction) where
+module CPU (CPU (..), execute1, initCPU, executeInstruction) where
 
 import Bus
   ( Address,
@@ -29,14 +29,14 @@ import Dbg
 import Instruction (ALUOp (..), CBOp (..), Cycles (..), Instruction (..), OpCode (..))
 import Registers
 
-data CPU = CPU {registers :: Registers, bus :: Bus, ime :: InterruptStep, clock :: Word64}
+data CPU = CPU {registers :: Registers, bus :: Bus, ime :: InterruptStep}
 
 data InterruptStep = Disabled | Enabled | PendingEnable deriving (Eq, Show)
 
 initCPU :: BL.ByteString -> BL.ByteString -> IO CPU
 initCPU boot cartridge = do
   bus <- initBus boot cartridge
-  return $ CPU {registers = initialRegisters, bus = bus, ime = Disabled, clock = 0}
+  return $ CPU {registers = initialRegisters, bus = bus, ime = Disabled}
 
 advanceAddr :: Address -> Int8 -> Word16
 advanceAddr pc imm8 =
@@ -47,50 +47,34 @@ advancePC :: Int8 -> Registers -> Registers
 advancePC imm8 regs =
   regs {rPC = advanceAddr regs.rPC imm8}
 
-execute :: (CPU -> IO Bool) -> CPU -> IO CPU
-execute endPred cpu = do
-  end <- endPred cpu
-  if end
-    then return cpu
-    else do
-      cpu1 <- execute1 cpu
-      execute endPred cpu1
-
-execute1 :: CPU -> IO CPU
+execute1 :: CPU -> IO (CPU, Word8)
 execute1 cpu = do
-  (cpu, executed) <- executeInterruption cpu
-  if executed then
-    return cpu
+  (cpu, elapsed) <- executeInterruption cpu
+  if elapsed > 0 then
+    return (cpu, elapsed)
   else do
     ins <- fetchInstruction cpu.registers.rPC cpu.bus
     let cpu1 = cpu {registers = advancePC (fromIntegral ins.len) cpu.registers}
     (cpu2, branched) <- executeInstruction cpu1 ins.op
-    return $
-      cpu2
-        { clock =
-            cpu1.clock
-              + fromIntegral
-                ( case ins.cycles of
+    return (cpu2, case ins.cycles of
                     Fixed n -> n
                     -- n < m
-                    Branch n m -> if branched then m else n
-                )
-        }
+                    Branch n m -> if branched then m else n)
 
-executeInterruption :: CPU -> IO (CPU, Bool)
+executeInterruption :: CPU -> IO (CPU, Word8)
 executeInterruption cpu = do
   case cpu.ime of
-    PendingEnable -> return (cpu{ime=Enabled}, False)
+    PendingEnable -> return (cpu{ime=Enabled}, 0)
     Enabled -> do
       maybeInt <- findM (\int -> isInterruptRequested int cpu.bus) [VBlank .. Joypad]
       case maybeInt of
         Just int -> do
           writeIF int False cpu.bus
           (cpu, _) <- callAddr16 (interruptAddress int) cpu
-          return (cpu{ime=Disabled, clock=cpu.clock+20}, True)
+          return (cpu{ime=Disabled}, 20)
         _ ->
-          return (cpu, False)
-    _ -> return (cpu, False)
+          return (cpu, 0)
+    _ -> return (cpu, 0)
 
 findM :: Monad m => (a -> m Bool) -> [a] -> m (Maybe a)
 findM _ [] = return Nothing

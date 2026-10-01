@@ -1,7 +1,9 @@
 module CPUSpec (spec) where
 
 import Bus (Bus (..), bootRomEnabled)
-import CPU (CPU (..), execute, execute1, initCPU)
+import CPU (CPU (..), execute1, initCPU)
+import qualified PPU
+import PPU (PPU, initPPU)
 import Data.ByteString.Lazy as BL
 import Data.Word
 import Registers
@@ -35,15 +37,26 @@ testCPU = do
 isBooted :: CPU -> IO Bool
 isBooted cpu = not <$> bootRomEnabled cpu.bus
 
+execute :: (CPU -> IO Bool) -> CPU -> PPU -> IO CPU
+execute endPred cpu ppu = do
+  end <- endPred cpu
+  if end
+    then return cpu
+    else do
+      (cpu', cycles) <- execute1 cpu
+      ppu' <- PPU.execute cycles ppu
+      execute endPred cpu' ppu'
+
 spec :: SpecWith ()
 spec = describe "CPU" $ do
   it "execute first instruction" $ do
     cpu <- testCPU
-    cpu1 <- execute1 cpu
+    (cpu1, _) <- execute1 cpu
     cpu1.registers.rSP `shouldBe` 0xFFFE
   it "execute boot rom" $ do
     cpu <- testCPU
-    cpu1 <- execute isBooted cpu
+    let ppu = initPPU cpu.bus
+    cpu1 <- execute isBooted cpu ppu
     cpu1.registers
       `shouldBe` Registers
         { rA = 0x01,

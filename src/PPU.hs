@@ -245,7 +245,7 @@ syncPPUToBus oldPPU ppu = do
       VerticalBlank -> writeIF VBlank True ppu.bus
       _ -> return ()
 
-execute :: Word64 -> PPU -> IO PPU
+execute :: Word8 -> PPU -> IO PPU
 execute 0 ppu = return ppu
 execute duration ppu = do
   let wasOn = ppu.lcdOn

@@ -91,7 +91,7 @@ data PPUMode
   | DrawingPixels
       { fetcherStep :: FIFOPixelFetcherStep
       , fetcherX :: Word8
-      , screenX :: Word8
+      , screenX :: Maybe Int
       , oam :: Queue FIFOPixel
       , background :: Queue FIFOPixel
       }
@@ -107,7 +107,7 @@ initOAMScan :: PPUMode
 initOAMScan = OAMScan Nothing
 
 initDrawingPixels :: PPUMode
-initDrawingPixels = DrawingPixels (GetTileIndex 0) 0 0 mempty mempty
+initDrawingPixels = DrawingPixels (GetTileIndex 0) 0 Nothing mempty mempty
 
 toIntMode :: PPUMode -> Word8
 toIntMode HorizontalBlank = 0
@@ -150,19 +150,29 @@ step ppu = do
       where
         render ppu = 
             case ppu.mode of
-              DrawingPixels a b screenX d bg ->
+              DrawingPixels a b maybeScreenX d bg ->
                 case dequeue bg of
                   Just (pixel, bg') -> do
-                    palette <- readBGPalette bus
-                    let color = getColor pixel.color palette
-                    let display' = renderPixel ppu.y screenX color ppu.display 
-                    let screenX' = screenX + 1
-                    if screenX' == 160 then
-                      return ppu{mode=HorizontalBlank, display=display'}
-                    else
-                      return ppu{mode=DrawingPixels a b screenX' d bg', display=display'}
+                    screenX <- resolveScreenX maybeScreenX
+                    if screenX < 0 then
+                      return ppu{mode=DrawingPixels a b (Just $ screenX + 1) d bg'}
+                    else do
+                      palette <- readBGPalette bus
+                      let color = getColor pixel.color palette
+                      let display' = renderPixel ppu.y (fromIntegral screenX) color ppu.display 
+                      let screenX' = screenX + 1
+                      if screenX' == 160 then
+                        return ppu{mode=HorizontalBlank, display=display'}
+                      else
+                        return ppu{mode=DrawingPixels a b (Just screenX') d bg', display=display'}
                   _ ->
                     return ppu
+                where
+                  resolveScreenX :: Maybe Int -> IO Int
+                  resolveScreenX Nothing = do
+                    scx <- readSCX bus
+                    return $ -(fromIntegral $ scx `mod` 8)
+                  resolveScreenX (Just sx) = return sx
               _ -> return ppu
 
         executeFetcherStep ppu =
@@ -194,8 +204,7 @@ step ppu = do
                   let bg' = foldl' (\acc colorIndex -> enqueue (FIFOPixel colorIndex 0 0) acc) bg (tileRowColorIndexes tileRow)
                   return ppu{mode=DrawingPixels (GetTileIndex 0) (fetcherX + 1) screenX oam bg'}
                 else
-                  -- TODO: move to HorizontalBlank mode
-                  return ppu{mode=DrawingPixels (Push tileRow) fetcherX screenX oam bg} 
+                  return ppu 
     HorizontalBlank ->
       return ppu
       

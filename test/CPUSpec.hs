@@ -37,11 +37,11 @@ testCPU = do
 isBooted :: CPU -> IO Bool
 isBooted cpu = not <$> bootRomEnabled cpu.bus
 
-execute :: (CPU -> IO Bool) -> CPU -> PPU -> IO CPU
+execute :: (CPU -> IO Bool) -> CPU -> PPU -> IO (CPU, PPU)
 execute endPred cpu ppu = do
   end <- endPred cpu
   if end
-    then return cpu
+    then return (cpu, ppu)
     else do
       (cpu', cycles) <- execute1 cpu
       ppu' <- PPU.execute cycles ppu
@@ -56,7 +56,8 @@ spec = describe "CPU" $ do
   it "execute boot rom" $ do
     cpu <- testCPU
     let ppu = initPPU cpu.bus
-    cpu1 <- execute isBooted cpu ppu
+    (cpu1, ppu1) <- execute isBooted cpu ppu
+    print ppu1.display
     cpu1.registers
       `shouldBe` Registers
         { rA = 0x01,

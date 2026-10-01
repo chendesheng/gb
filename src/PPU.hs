@@ -1,4 +1,5 @@
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
+{-# LANGUAGE BangPatterns #-}
 module PPU (execute, FIFOPixel(..), PPU(..), initPPU) where
 
 import Prelude hiding (replicate)
@@ -20,13 +21,13 @@ initDisplay :: Display
 initDisplay = Display (replicate 144 (replicate 160 Blank))
 
 renderPixel :: Word8 -> Word8 -> Color -> Display -> Display
-renderPixel y x color (Display rows) =
+renderPixel y x !color (Display rows) =
   let y' = fromIntegral y
       row = rows ! y'
       x' = fromIntegral x
-      row' = row // [(x', color)]
-  in
-  Display $ rows // [(y', row')]
+      !row' = row // [(x', color)]
+      !res = Display $ rows // [(y', row')]
+  in res
 
 data FIFOPixel = FIFOPixel
   { color :: ColorIndex -- 0 - 3
@@ -45,10 +46,11 @@ instance Show Display where
       showRow = toList . fmap showPixel
 
       showPixel :: Color -> Char
-      showPixel Blank = 'W'
-      showPixel LightGray = 'L'
-      showPixel DarkGray = 'D'
-      showPixel Black = 'B'
+      -- change to use terminal color rect (unicode rect with terminal color) instead
+      showPixel Blank = '\x2588'
+      showPixel LightGray = '\x2591'
+      showPixel DarkGray = '\x2592'
+      showPixel Black = '\x2593'
 
 -- color :: Pixel -> Word32
 -- color 0 = 0x9BBC0F
@@ -167,7 +169,7 @@ step ppu = do
                     else do
                       palette <- readBGPalette bus
                       let color = getColor pixel.color palette
-                      let display' = renderPixel ppu.y (fromIntegral screenX) color ppu.display
+                      let !display' = renderPixel ppu.y (fromIntegral screenX) color ppu.display
                       let screenX' = screenX + 1
                       if screenX' == 160 then
                         return ppu{mode=HorizontalBlank, display=display'}

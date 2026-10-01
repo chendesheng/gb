@@ -47,6 +47,15 @@ advancePC :: Int8 -> Registers -> Registers
 advancePC imm8 regs =
   regs {rPC = advanceAddr regs.rPC imm8}
 
+addWithCarry :: Word8 -> Word8 -> Bool -> (Word8, Bool, Bool)
+addWithCarry a b carry =
+  let carryIn = if carry then 1 else 0
+      total = fromIntegral a + fromIntegral b + carryIn :: Int
+      result = fromIntegral total :: Word8
+      carryOut = total > 0xFF
+      halfCarry = ((a .&. 0x0F) + (b .&. 0x0F) + fromIntegral carryIn) > 0x0F
+   in (result, carryOut, halfCarry)
+
 execute1 :: CPU -> IO (CPU, Word8)
 execute1 cpu = do
   (cpu, elapsed) <- executeInterruption cpu
@@ -117,9 +126,41 @@ executeInstruction :: CPU -> OpCode -> IO (CPU, Bool)
 executeInstruction cpu op = do
   let bus = cpu.bus
   let regs = cpu.registers
-  case echo "execute op: " op of
+  case op of
     NOP -> return (cpu, False)
     HALT -> error "HALT"
+    ALU_A_R8 ADD src -> do
+      dstVal <- readR8 regs bus A
+      srcVal <- readR8 regs bus src
+      let (a, carry, half) = addWithCarry dstVal srcVal False
+      regs1 <- writeR8 regs bus A a
+      return
+        ( cpu
+            { registers =
+                regs1
+                  & setZflag (a == 0)
+                  & setNflag False
+                  & setCflag carry
+                  & setHflag half
+            },
+          False
+        )
+    ALU_A_R8 SUB src -> do
+      dstVal <- readR8 regs bus A
+      srcVal <- readR8 regs bus src
+      let a = dstVal - srcVal
+      regs1 <- writeR8 regs bus A a
+      return
+        ( cpu
+            { registers =
+                regs1
+                  & setZflag (a == 0)
+                  & setNflag True
+                  & setCflag (dstVal < srcVal)
+                  & setHflag ((dstVal .&. 0x0F) < (srcVal .&. 0x0F))
+            },
+          False
+        )
     ALU_A_R8 XOR src -> do
       srcVal <- readR8 regs bus src
       dstVal <- readR8 regs bus A
@@ -136,6 +177,25 @@ executeInstruction cpu op = do
             },
           False
         )
+    ALU_A_R8 CP src -> do
+      a <- readR8 regs bus A
+      srcVal <- readR8 regs bus src
+      let regs' =
+            regs
+              & setZflag (a == srcVal)
+              & setNflag True
+              & setHflag ((a .&. 0x0F) < (srcVal .&. 0x0F))
+              & setCflag (a < srcVal)
+      return (cpu {registers = regs'}, False)
+    ALU_A_imm8 CP n -> do
+      a <- readR8 regs bus A
+      let regs' =
+            regs
+              & setZflag (a == n)
+              & setNflag True
+              & setHflag ((a .&. 0x0F) < (n .&. 0x0F))
+              & setCflag (a < n)
+      return (cpu {registers = regs'}, False)
     LD_r8_r8 dst src -> do
       val <- readR8 regs bus src
       regs1 <- writeR8 regs bus dst val
@@ -242,7 +302,7 @@ executeInstruction cpu op = do
     CALL_addr16 addr -> callAddr16 addr cpu
     RET -> do
       (cpu', pc) <- pop16 cpu
-      return (cpu {registers = echo "registers: " $ cpu'.registers {rPC = pc}}, False)
+      return (cpu {registers = cpu'.registers {rPC = pc}}, False)
     PUSH stk -> do
       let val = getR16Stk stk regs
       cpu' <- push16 val cpu
@@ -266,15 +326,6 @@ executeInstruction cpu op = do
           bus
           A
           val'
-      return (cpu {registers = regs'}, False)
-    ALU_A_imm8 CP n -> do
-      a <- readR8 regs bus A
-      let regs' =
-            regs
-              & setZflag (a == n)
-              & setNflag True
-              & setHflag ((a .&. 0x0F) < (n .&. 0x0F))
-              & setCflag (a < n)
       return (cpu {registers = regs'}, False)
     EI -> return (cpu {ime = if cpu.ime == Enabled then Enabled else PendingEnable}, False)
     DI -> return (cpu {ime = Disabled}, False)

@@ -2,6 +2,7 @@
 module PPU (execute, FIFOPixel(..), PPU(..), initPPU) where
 
 import Prelude hiding (replicate)
+import Control.Monad (when)
 import Bus
 import Color
 import Data.Vector (Vector, replicate, toList, snoc, modify, (//), (!))
@@ -95,6 +96,13 @@ data PPUMode
       , oam :: Queue FIFOPixel
       , background :: Queue FIFOPixel
       }
+
+instance Eq PPUMode where
+  HorizontalBlank == HorizontalBlank = True
+  VerticalBlank == VerticalBlank = True
+  OAMScan a == OAMScan b = a == b
+  DrawingPixels {} == DrawingPixels {} = True
+  _ == _ = False
 
 data FIFOPixelFetcherStep
   = GetTileIndex Int
@@ -228,10 +236,14 @@ readBgTileIndex ly x bus = do
   let bgX = x + scx
   readTileIndex base bgY bgX bus
 
-syncPPUToBus :: PPU -> IO PPU
-syncPPUToBus ppu = do
+syncPPUToBus :: PPU -> PPU -> IO ()
+syncPPUToBus oldPPU ppu = do
   syncPPU ppu.y (toIntMode ppu.mode) ppu.bus
-  return ppu
+  -- use if instead
+  when (oldPPU.mode /= ppu.mode) $
+    case ppu.mode of
+      VerticalBlank -> writeIF VBlank True ppu.bus
+      _ -> return ()
 
 execute :: Word64 -> PPU -> IO PPU
 execute 0 ppu = return ppu
@@ -247,5 +259,5 @@ execute duration ppu = do
     (True, True) -> do
       ppu1 <- step ppu
       let ppu2 = advanceXY ppu1
-      ppu3 <- syncPPUToBus ppu2
-      execute (duration - 1) ppu3
+      syncPPUToBus ppu ppu2
+      execute (duration - 1) ppu2

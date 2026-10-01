@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 module CPU (CPU (..), execute1, execute, initCPU, executeInstruction) where
 
 import Bus
@@ -14,6 +15,10 @@ import Bus
     writeByteHighMemory,
     writeR16,
     writeR8,
+    writeIF,
+    isInterruptRequested,
+    Interrupt(..),
+    interruptAddress,
   )
 import Data.Bits (shiftL, xor, (.&.), (.|.))
 import qualified Data.ByteString.Lazy as BL
@@ -24,12 +29,14 @@ import Dbg
 import Instruction (ALUOp (..), CBOp (..), Cycles (..), Instruction (..), OpCode (..))
 import Registers
 
-data CPU = CPU {registers :: Registers, bus :: Bus, clock :: Word64}
+data CPU = CPU {registers :: Registers, bus :: Bus, ime :: InterruptStep, clock :: Word64}
+
+data InterruptStep = Disabled | Enabled | PendingEnable deriving (Eq, Show)
 
 initCPU :: BL.ByteString -> BL.ByteString -> IO CPU
 initCPU boot cartridge = do
   bus <- initBus boot cartridge
-  return $ CPU {registers = initialRegisters, bus = bus, clock = 0}
+  return $ CPU {registers = initialRegisters, bus = bus, ime = Disabled, clock = 0}
 
 advanceAddr :: Address -> Int8 -> Word16
 advanceAddr pc imm8 =
@@ -51,20 +58,45 @@ execute endPred cpu = do
 
 execute1 :: CPU -> IO CPU
 execute1 cpu = do
-  ins <- fetchInstruction cpu.registers.rPC cpu.bus
-  let cpu1 = cpu {registers = advancePC (fromIntegral ins.len) cpu.registers}
-  (cpu2, branched) <- executeInstruction cpu1 ins.op
-  return $
-    cpu2
-      { clock =
-          cpu1.clock
-            + fromIntegral
-              ( case ins.cycles of
-                  Fixed n -> n
-                  -- n < m
-                  Branch n m -> if branched then m else n
-              )
-      }
+  (cpu, executed) <- executeInterruption cpu
+  if executed then
+    return cpu
+  else do
+    ins <- fetchInstruction cpu.registers.rPC cpu.bus
+    let cpu1 = cpu {registers = advancePC (fromIntegral ins.len) cpu.registers}
+    (cpu2, branched) <- executeInstruction cpu1 ins.op
+    return $
+      cpu2
+        { clock =
+            cpu1.clock
+              + fromIntegral
+                ( case ins.cycles of
+                    Fixed n -> n
+                    -- n < m
+                    Branch n m -> if branched then m else n
+                )
+        }
+
+executeInterruption :: CPU -> IO (CPU, Bool)
+executeInterruption cpu = do
+  case cpu.ime of
+    PendingEnable -> return (cpu{ime=Enabled}, False)
+    Enabled -> do
+      maybeInt <- findM (\int -> isInterruptRequested int cpu.bus) [VBlank .. Joypad]
+      case maybeInt of
+        Just int -> do
+          writeIF int False cpu.bus
+          (cpu, _) <- callAddr16 (interruptAddress int) cpu
+          return (cpu{ime=Disabled, clock=cpu.clock+20}, True)
+        _ ->
+          return (cpu, False)
+    _ -> return (cpu, False)
+
+findM :: Monad m => (a -> m Bool) -> [a] -> m (Maybe a)
+findM _ [] = return Nothing
+findM p (x:xs) = do
+  b <- p x
+  if b then return (Just x) else findM p xs
 
 condSatisfied :: Cond -> Registers -> Bool
 condSatisfied cond regs = case cond of
@@ -90,6 +122,12 @@ pop16 cpu = do
   l <- readByte sp bus
   h <- readByte (sp + 1) bus
   return (cpu {registers = regs {rSP = sp + 2}}, fromWord8s h l)
+
+callAddr16 :: Word16 -> CPU -> IO (CPU, Bool)
+callAddr16 addr cpu = do
+  let regs = cpu.registers
+  cpu' <- push16 regs.rPC cpu
+  return (cpu' {registers = cpu'.registers {rPC = addr}}, False)
 
 executeInstruction :: CPU -> OpCode -> IO (CPU, Bool)
 executeInstruction cpu op = do
@@ -217,9 +255,7 @@ executeInstruction cpu op = do
       val <- readByte addr bus
       regs' <- writeR8 regs bus A val
       return (cpu {registers = updateR16MemHL src regs'}, False)
-    CALL_addr16 addr -> do
-      cpu' <- push16 regs.rPC cpu
-      return (cpu' {registers = cpu'.registers {rPC = addr}}, False)
+    CALL_addr16 addr -> callAddr16 addr cpu
     RET -> do
       (cpu', pc) <- pop16 cpu
       return (cpu {registers = echo "registers: " $ cpu'.registers {rPC = pc}}, False)
@@ -256,4 +292,10 @@ executeInstruction cpu op = do
               & setHflag ((a .&. 0x0F) < (n .&. 0x0F))
               & setCflag (a < n)
       return (cpu {registers = regs'}, False)
+    EI -> return (cpu {ime = if cpu.ime == Enabled then Enabled else PendingEnable}, False)
+    DI -> return (cpu {ime = Disabled}, False)
+    RETI -> do
+      -- RET + EI
+      (cpu', pc) <- pop16 cpu
+      return (cpu {registers = cpu'.registers {rPC = pc}, ime = Enabled}, False)
     _ -> todo $ "execute instruction op " ++ show op

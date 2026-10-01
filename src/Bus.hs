@@ -41,15 +41,23 @@ module Bus
     readTileIndex,
     readBgTileRowLow,
     readBgTileRowHigh,
+    Interrupt (..),
+    readIE,
+    writeIE,
+    readIF,
+    writeIF,
+    isInterruptRequested,
+    interruptAddress,
   )
 where
 
 import Data.Binary.Get (runGet)
-import Data.Bits ((.|.), (.&.), Bits (shiftR), setBit, clearBit)
+import Data.Bits ((.|.), (.&.), Bits (shiftR, testBit), setBit, clearBit)
 import qualified Data.ByteString.Lazy as BL
 import Data.Vector.Unboxed (Vector, (!))
 import qualified Data.Vector.Unboxed as V
 import qualified Data.Vector.Unboxed.Mutable as MV
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Word
 import Instruction (Instruction, instructionDecoder)
 import Registers
@@ -78,7 +86,8 @@ data Bus = Bus
     wram :: Ram,
     oam :: Ram,
     hram :: Ram,
-    io :: Ram
+    io :: Ram,
+    ie :: IORef Word8
   }
 
 initBus :: BL.ByteString -> BL.ByteString -> IO Bus
@@ -88,6 +97,7 @@ initBus boot cartridge = do
   oam <- MV.replicate 0x00A0 0xCD -- FE00-FE9F
   hram <- MV.replicate 0x007F 0xCD -- FF80-FFFE
   io <- MV.replicate 0x0080 0x00 -- FF00-FF7F, rough/simple
+  ie  <- newIORef 0x00
   return
     Bus
       { boot = byteStringToVector boot,
@@ -96,7 +106,8 @@ initBus boot cartridge = do
         wram,
         oam,
         hram,
-        io
+        io,
+        ie
       }
 
 readByte0xFF50 :: Bus -> IO Word8
@@ -128,7 +139,7 @@ readByte addr bus
       readRam (addr - 0xFF00) bus.io
   | 0xFF80 <= addr && addr < 0xFFFF =
       readRam (addr - 0xFF80) bus.hram
-  | addr == 0xFFFF = return 0 -- TODO
+  | addr == 0xFFFF = readIORef bus.ie
   | otherwise = return 0xFF
 
 readBytes :: Address -> Int -> Bus -> IO [Word8]
@@ -189,7 +200,9 @@ writeByte addr val bus
   | 0xFF80 <= addr && addr < 0xFFFF = do
       writeRam (addr - 0xFF80) val bus.hram
       return bus
-  | addr == 0xFFFF = return bus
+  | addr == 0xFFFF = do
+      writeIORef bus.ie val
+      return bus
   | otherwise = return bus
 
 readPPUMode :: Ram -> IO Word8
@@ -402,3 +415,45 @@ readBgTileRowHigh :: TileIndex -> Word8 -> Bus -> IO Word8
 readBgTileRowHigh index y bus = do
   addr <- readBgTileRowBaseAddress index y bus
   readRam (addr + 1 - 0x8000) bus.vram
+
+-- Interruption
+data Interrupt = VBlank | LCDStat | Timer | Serial | Joypad  deriving (Show, Eq, Enum)
+
+interruptAddress :: Interrupt -> Address
+interruptAddress VBlank = 0x40
+interruptAddress LCDStat = 0x48
+interruptAddress Timer = 0x50
+interruptAddress Serial = 0x58
+interruptAddress Joypad = 0x60
+
+readIE :: Interrupt -> Bus -> IO Bool
+readIE int bus = do
+  b <- readByte 0xFFFF bus
+  return $ b `testBit` fromEnum int
+
+writeIE :: Interrupt -> Bool -> Bus -> IO ()
+writeIE int val bus = do
+  b <- readByte 0xFFFF bus
+  let bit = fromEnum int
+  let update = if val then setBit else clearBit
+  _ <- writeByte 0xFFFF (b `update` bit) bus
+  return ()
+
+readIF :: Interrupt -> Bus -> IO Bool
+readIF int bus = do
+  b <- readByte 0xFF0F bus
+  return $ b `testBit` fromEnum int
+
+writeIF :: Interrupt -> Bool -> Bus -> IO ()
+writeIF int val bus = do
+  b <- readByte 0xFF0F bus
+  let bit = fromEnum int
+  let update = if val then setBit else clearBit
+  _ <- writeByte 0xFF0F (b `update` bit) bus
+  return ()
+
+isInterruptRequested :: Interrupt -> Bus -> IO Bool
+isInterruptRequested interrupt bus = do
+  ie <- readIE interrupt bus
+  if_ <- readIF interrupt bus
+  return $ ie && if_

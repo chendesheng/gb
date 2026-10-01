@@ -27,8 +27,11 @@ type TileRow = (Word8, Word8)
 
 tileRowColorIndexes :: TileRow -> [ColorIndex]
 tileRowColorIndexes (low, high) =
-  let ls = [ if testBit low i then 1 else 0 | i <- [7,6..0] ]
-      hs = [ if testBit high i then 2 else 0 | i <- [7,6..0] ]
-  in
-    zipWith (\l h -> toEnum $ l .|. h) ls hs
-    
+  [tileRowColorIndex i (low, high) | i <- [0 .. 7]]
+
+tileRowColorIndex :: Int -> TileRow -> ColorIndex
+tileRowColorIndex i (low, high) =
+  let bit = 7 - i
+      l = if testBit low bit then 1 else 0
+      h = if testBit high bit then 2 else 0
+  in toEnum $ l .|. h

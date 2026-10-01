@@ -193,6 +193,9 @@ opCodeDecoder = do
     0xfe -> ALU_A_imm8 CP <$> getWord8
     0x21 -> LD_r16_imm16 HL <$> getWord16le
     0xdd -> return $ INVALID b
+    0xFB -> return EI
+    0xF3 -> return DI
+    0xD9 -> return RETI
     _ -> return $ INVALID b
 
 -- _ -> todo $ "unknown opcode: 0x" ++ showHex b ""
@@ -252,6 +255,9 @@ cyclesOf opcode =
     PREFIX_CB (SRL AtHL) -> Fixed 16
     PREFIX_CB (SWAP AtHL) -> Fixed 16
     PREFIX_CB _ -> Fixed 8
+    EI -> Fixed 4
+    DI -> Fixed 4
+    RETI -> Fixed 16
     _ -> error $ "missing cycles for " ++ show opcode
 
 instructionDecoder :: Get Instruction

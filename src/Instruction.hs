@@ -10,6 +10,7 @@ module Instruction
     R16Mem (..),
     ALUOp (..),
     CBOp (..),
+    SubOp (..),
   )
 where
 
@@ -33,8 +34,8 @@ data CBOp
   | SWAP R8
   | SRL R8
   | BIT Word8 R8
-  | RES Word8 R8
-  | SET Word8 R8
+  | RES SubOp Word8 R8
+  | SET SubOp Word8 R8
   deriving (Show, Eq)
 
 data RstTarget
@@ -48,6 +49,9 @@ data RstTarget
   | RST38
   deriving (Show, Eq)
 
+data SubOp = SubOpRead | SubOpWrite Word8
+  deriving (Show, Eq)
+
 data OpCode
   = ADD_HL_r16 R16
   | ADD_SP_imm8 Int8
@@ -59,12 +63,12 @@ data OpCode
   | CPL
   | DAA
   | DEC_r16 R16
-  | DEC_r8 R8
+  | DEC_r8 SubOp R8
   | DI
   | EI
   | HALT
   | INC_r16 R16
-  | INC_r8 R8
+  | INC_r8 SubOp R8
   | INVALID Word8
   | JP_HL
   | JP_cond_imm16 Cond Word16
@@ -124,35 +128,36 @@ opCodeDecoder = do
     0 -> return NOP
     0x01 -> LD_r16_imm16 BC <$> getWord16le
     0x03 -> return $ INC_r16 BC
-    0x04 -> return $ INC_r8 B
-    0x05 -> return $ DEC_r8 B
+    0x04 -> return $ INC_r8 SubOpRead B
+    0x05 -> return $ DEC_r8 SubOpRead B
     0x06 -> LD_r8_imm8 B <$> getWord8
     0x08 -> LD_imm16_SP <$> getWord16le
     0x0b -> return $ DEC_r16 BC
-    0x0c -> return $ INC_r8 C
-    0x0d -> return $ DEC_r8 C
+    0x0c -> return $ INC_r8 SubOpRead C
+    0x0d -> return $ DEC_r8 SubOpRead C
     0x0e -> LD_r8_imm8 C <$> getWord8
     0x11 -> LD_r16_imm16 DE <$> getWord16le
     0x13 -> return $ INC_r16 DE
-    0x15 -> return $ DEC_r8 D
+    0x15 -> return $ DEC_r8 SubOpRead D
     0x16 -> LD_r8_imm8 D <$> getWord8
     0x1a -> return $ LD_A_AtR16mem DEm
     0x17 -> return RLA
     0x18 -> JR_imm8 <$> getInt8
-    0x1d -> return $ DEC_r8 E
+    0x1d -> return $ DEC_r8 SubOpRead E
     0x1e -> LD_r8_imm8 E <$> getWord8
     0x20 -> JR_cond_imm8 NZ <$> getInt8
     0x22 -> return $ LD_AtR16mem_A HLi
     0x23 -> return $ INC_r16 HL
-    0x24 -> return $ INC_r8 H
+    0x24 -> return $ INC_r8 SubOpRead H
     0x26 -> LD_r8_imm8 H <$> getWord8
     0x28 -> JR_cond_imm8 Z <$> getInt8
     0x2e -> LD_r8_imm8 L <$> getWord8
     0x2f -> return CPL
     0x31 -> LD_r16_imm16 SP <$> getWord16le
     0x32 -> return $ LD_AtR16mem_A HLd
-    0x3c -> return $ INC_r8 A
-    0x3d -> return $ DEC_r8 A
+    0x35 -> return $ DEC_r8 SubOpRead AtHL
+    0x3c -> return $ INC_r8 SubOpRead A
+    0x3d -> return $ DEC_r8 SubOpRead A
     0x3e -> LD_r8_imm8 A <$> getWord8
     0x47 -> return $ LD_r8_r8 B A
     0x4f -> return $ LD_r8_r8 C A

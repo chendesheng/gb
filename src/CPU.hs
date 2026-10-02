@@ -26,10 +26,10 @@ import Data.Function ((&))
 import Data.Int (Int8)
 import Data.Word
 import Dbg
-import Instruction (ALUOp (..), CBOp (..), Instruction (..), OpCode (..))
+import Instruction
 import Registers
 
-data CPU = CPU {registers :: Registers, bus :: Bus, ime :: InterruptStep, currentInstruction :: Maybe Instruction }
+data CPU = CPU {registers :: Registers, bus :: Bus, ime :: InterruptStep, currentInstruction :: Maybe OpCode }
 
 data InterruptStep = Disabled | Enabled | PendingEnable deriving (Eq, Show)
 
@@ -65,14 +65,14 @@ execute cpu = do
           return (cpu, elapsed)
         else do
             ins <- fetchInstruction cpu.registers.rPC cpu.bus
-            return (cpu { currentInstruction = Just ins
+            return (cpu { currentInstruction = Just ins.op
                         , registers = advancePC (fromIntegral ins.len) cpu.registers
                         }
                   , ins.len * 4
                   )
-      Just ins -> do
-        (cpu', elapsed) <- executeInstruction cpu ins.op
-        return (cpu'{currentInstruction=Nothing}, elapsed)
+      Just op -> do
+        (cpu', elapsed) <- executeInstruction cpu{currentInstruction=Nothing} op
+        return (cpu', elapsed)
 
 executeInterruption :: CPU -> IO (CPU, Word8)
 executeInterruption cpu = do
@@ -271,8 +271,10 @@ executeInstruction cpu op = do
     LDH_AtC_A -> do
       _ <- writeByteHighMemory regs.rC regs.rA bus
       return (cpu, 4)
-    INC_r8 r8 -> do
+    INC_r8 SubOpRead r8 -> do
       val <- readR8 regs bus r8
+      return (cpu{currentInstruction=Just (INC_r8 (SubOpWrite val) r8)}, memoryCycles r8)
+    INC_r8 (SubOpWrite val) r8 -> do
       let val' = val + 1
       regs' <- writeR8 regs bus r8 val'
       return
@@ -283,14 +285,16 @@ executeInstruction cpu op = do
                   & setNflag False
                   & setHflag ((val .&. 0x0F) == 0x0F)
             },
-          2 * memoryCycles r8
+          memoryCycles r8
         )
     INC_r16 r16 -> do
       let val = readR16 regs r16
           regs' = writeR16 regs r16 $ val + 1
       return (cpu {registers = regs'}, 4)
-    DEC_r8 r8 -> do
+    DEC_r8 SubOpRead r8 -> do
       val <- readR8 regs bus r8
+      return (cpu{currentInstruction=Just (DEC_r8 (SubOpWrite val) r8)}, memoryCycles r8)
+    DEC_r8 (SubOpWrite val) r8 -> do
       let val' = val - 1
       regs' <- writeR8 regs bus r8 val'
       return
@@ -301,7 +305,7 @@ executeInstruction cpu op = do
                   & setNflag True
                   & setHflag ((val .&. 0x0F) == 0x00)
             },
-          2 * memoryCycles r8
+          memoryCycles r8
         )
     LD_A_AtR16mem src -> do
       let addr = readR16Mem regs src

@@ -4,9 +4,10 @@ import Bus (readByte, readByteHighMemory, readR16, writeR8, writeByte, writeR16,
 import CPU (CPU (..), executeInstruction, initCPU)
 import Control.Monad (foldM)
 import Data.Binary.Get (runGet)
+import Data.Maybe (fromJust)
 import Data.ByteString.Lazy as BL
 import Data.Word
-import Instruction (ALUOp (..), CBOp (..), OpCode (..), instructionDecoder)
+import Instruction (ALUOp (..), CBOp (..), OpCode (..), SubOp(..), instructionDecoder)
 import qualified Instruction as I
 import Registers
 import Test.Hspec
@@ -80,12 +81,13 @@ spec = describe "Instruction" $ do
     (cpu2, 4) <- executeInstruction cpu1 LDH_AtC_A
     val <- readByteHighMemory 0x01 cpu2.bus
     val `shouldBe` 0xAA
-  it "INC_r8 D" $ do
+  it "INC_r8 SubOpRead D" $ do
     cpu <- testCPU
     cpu1 <- cpuWriteR8 D 0x0F cpu
-    (cpu2, 0) <- executeInstruction cpu1 $ INC_r8 D
-    cpu2.registers.rD `shouldBe` 0x10
-    hflag cpu2.registers `shouldBe` True
+    (cpu2, 0) <- executeInstruction cpu1 $ INC_r8 SubOpRead D
+    (cpu3, 0) <- executeInstruction cpu1 $ fromJust cpu2.currentInstruction
+    cpu3.registers.rD `shouldBe` 0x10
+    hflag cpu3.registers `shouldBe` True
   it "INC_r16 BC" $ do
     cpu <- testCPU
     cpu1 <- cpuWriteR16 BC 0x0102 cpu
@@ -95,15 +97,17 @@ spec = describe "Instruction" $ do
   it "DEC_r8 E" $ do
     cpu <- testCPU
     cpu1 <- cpuWriteR8 E 0x01 cpu
-    (cpu2, 0) <- executeInstruction cpu1 $ DEC_r8 E
-    cpu2.registers.rE `shouldBe` 0x00
-    zflag cpu2.registers `shouldBe` True
+    (cpu2, 0) <- executeInstruction cpu1 $ DEC_r8 SubOpRead E
+    (cpu3, 0) <- executeInstruction cpu2 $ fromJust cpu2.currentInstruction
+    cpu3.registers.rE `shouldBe` 0x00
+    zflag cpu3.registers `shouldBe` True
   it "DEC_r8 E <2>" $ do
     cpu <- testCPU
     cpu1 <- cpuWriteR8 E 0x10 cpu
-    (cpu2, 0) <- executeInstruction cpu1 $ DEC_r8 E
-    cpu2.registers.rE `shouldBe` 0x0F
-    hflag cpu2.registers `shouldBe` True
+    (cpu2, 0) <- executeInstruction cpu1 $ DEC_r8 SubOpRead E
+    (cpu3, 0) <- executeInstruction cpu2 $ fromJust cpu2.currentInstruction
+    cpu3.registers.rE `shouldBe` 0x0F
+    hflag cpu3.registers `shouldBe` True
   it "LD_A_AtR16mem HLd" $ do
     cpu <- testCPU
     _ <- writeByte 0x8001 0xAA cpu.bus

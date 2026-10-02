@@ -15,23 +15,26 @@ import Bus
     writeByteHighMemory,
     writeR16,
     writeR8,
+    readIF,
+    readIE,
     writeIF,
-    isInterruptRequested,
-    Interrupt(..),
+    Interrupts,
     interruptAddress,
   )
-import Data.Bits (shiftL, xor, (.&.), (.|.))
+import Data.Bits ((.<<.), xor, (.>>.), (.&.), (.|.))
 import qualified Data.ByteString.Lazy as BL
 import Data.Function ((&))
 import Data.Int (Int8)
 import Data.Word
+import Data.List (intersect)
 import Dbg
 import Instruction
 import Registers
 
 data CPU = CPU {registers :: Registers, bus :: Bus, ime :: InterruptStep, currentInstruction :: Maybe OpCode }
 
-data InterruptStep = Disabled | Enabled | PendingEnable deriving (Eq, Show)
+data InterruptStep = Disabled | PendingEnable | GetIntRequest | Enabled InterruptServiceStep  deriving (Eq, Show)
+data InterruptServiceStep = IntSrvWriteSPHigh | IntSrvWriteSPLow | IntSrvJmp Interrupts deriving (Eq, Show)
 
 initCPU :: BL.ByteString -> BL.ByteString -> IO CPU
 initCPU boot cartridge = do
@@ -77,29 +80,44 @@ execute cpu = do
 executeInterruption :: CPU -> IO (CPU, Word8)
 executeInterruption cpu = do
   case cpu.ime of
-    PendingEnable -> return (cpu{ime=Enabled}, 0)
-    Enabled -> do
-      maybeInt <- findM (\int -> isInterruptRequested int cpu.bus) [VBlank .. Joypad]
-      case maybeInt of
-        Just int -> do
+    PendingEnable -> return (cpu{ime=GetIntRequest}, 0)
+    GetIntRequest -> do
+      ie <- readIE cpu.bus
+      if_ <- readIF cpu.bus
+      return $ if null $ ie `intersect` if_ then
+                 (cpu, 0)
+               else
+                (cpu{ime=Enabled IntSrvWriteSPHigh}, 8)
+    Enabled IntSrvWriteSPHigh -> do
+      let addr = cpu.registers.rPC
+      cpu' <- push8 (addr .>>. 8 .&. 0xFF & fromIntegral) cpu
+      return (cpu'{ime=Enabled IntSrvWriteSPLow}, 4)
+    Enabled IntSrvWriteSPLow -> do
+      ie <- readIE cpu.bus
+      cpu' <- push8 (fromIntegral cpu.registers.rPC) cpu
+      return (cpu'{ime=Enabled $ IntSrvJmp ie }, 4)
+    Enabled (IntSrvJmp ie) -> do
+      if_ <- readIF cpu.bus
+      case ie `intersect` if_ of
+        (int:_) -> do
           writeIF int False cpu.bus
-          cpu <- callAddr16 (interruptAddress int) cpu
-          return (cpu{ime=Disabled}, 20)
-        _ ->
-          return (cpu, 0)
-    _ -> return (cpu, 0)
-
-findM :: Monad m => (a -> m Bool) -> [a] -> m (Maybe a)
-findM _ [] = return Nothing
-findM p (x:xs) = do
-  b <- p x
-  if b then return (Just x) else findM p xs
+          return (cpu{ime=Disabled, registers=cpu.registers{rPC=interruptAddress int}}, 4)
+        _ -> return (cpu{ime=Disabled, registers=cpu.registers{rPC=0}}, 4)
+    Disabled -> return (cpu, 0)
 
 condSatisfied :: Cond -> Registers -> Bool
 condSatisfied cond regs = case cond of
   NZ -> not $ zflag regs
   Z -> zflag regs
   _ -> todo $ "cond " ++ show cond
+
+push8 :: Word8 -> CPU -> IO CPU
+push8 val cpu = do
+  let regs = cpu.registers
+      bus = cpu.bus
+      sp = regs.rSP - 1
+  _ <- writeByte sp val bus
+  return cpu {registers = regs {rSP = sp}}
 
 push16 :: Word16 -> CPU -> IO CPU
 push16 val cpu = do
@@ -252,7 +270,7 @@ executeInstruction cpu op = do
       val <- readR8 regs bus r8
       let c = cflag regs
           newc = (val .&. 0x80) /= 0
-          val' = val `shiftL` 1 .|. (if c then 1 else 0)
+          val' = val .<<. 1 .|. (if c then 1 else 0)
       regs' <-
         writeR8
           ( regs
@@ -329,7 +347,7 @@ executeInstruction cpu op = do
       val <- readR8 regs bus A
       let c = cflag regs
           newc = (val .&. 0x80) /= 0
-          val' = val `shiftL` 1 .|. (if c then 1 else 0)
+          val' = val .<<. 1 .|. (if c then 1 else 0)
       regs' <-
         writeR8
           ( regs
@@ -342,10 +360,14 @@ executeInstruction cpu op = do
           A
           val'
       return (cpu {registers = regs'}, 0)
-    EI -> return (cpu {ime = if cpu.ime == Enabled then Enabled else PendingEnable}, 0)
+    EI -> return (cpu {ime = case cpu.ime of
+                                Disabled -> PendingEnable
+                                PendingEnable -> PendingEnable
+                                _ ->  cpu.ime
+                                }, 0)
     DI -> return (cpu {ime = Disabled}, 0)
     RETI -> do
       -- RET + EI
       (cpu', pc) <- pop16 cpu
-      return (cpu {registers = cpu'.registers {rPC = pc}, ime = Enabled}, 12)
+      return (cpu {registers = cpu'.registers {rPC = pc}, ime = GetIntRequest}, 12)
     _ -> todo $ "execute instruction op " ++ show op

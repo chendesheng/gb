@@ -42,11 +42,11 @@ module Bus
     readBgTileRowLow,
     readBgTileRowHigh,
     Interrupt (..),
+    Interrupts,
     readIE,
     writeIE,
     readIF,
     writeIF,
-    isInterruptRequested,
     interruptAddress,
   )
 where
@@ -426,10 +426,23 @@ interruptAddress Timer = 0x50
 interruptAddress Serial = 0x58
 interruptAddress Joypad = 0x60
 
-readIE :: Interrupt -> Bus -> IO Bool
-readIE int bus = do
-  b <- readByte 0xFFFF bus
-  return $ b `testBit` fromEnum int
+filterM :: Monad m => (a -> m Bool) -> [a] -> m [a]
+filterM _ [] = return []
+filterM p (x:xs) = do
+  b <- p x
+  rest <- filterM p xs
+  return (if b then x : rest else rest)
+
+type Interrupts = [Interrupt]
+
+filterInterrupts :: (Bus -> IO Word8) -> Bus -> IO Interrupts
+filterInterrupts f bus = filterM (\int -> do
+                                    b <- f bus
+                                    return $ b `testBit` fromEnum int
+                                ) [VBlank .. Joypad]
+
+readIE :: Bus -> IO Interrupts
+readIE = filterInterrupts $ readByte 0xFFFF
 
 writeIE :: Interrupt -> Bool -> Bus -> IO ()
 writeIE int val bus = do
@@ -439,10 +452,8 @@ writeIE int val bus = do
   _ <- writeByte 0xFFFF (b `update` bit) bus
   return ()
 
-readIF :: Interrupt -> Bus -> IO Bool
-readIF int bus = do
-  b <- readByte 0xFF0F bus
-  return $ b `testBit` fromEnum int
+readIF :: Bus -> IO Interrupts
+readIF = filterInterrupts $ readByte 0xFF0F
 
 writeIF :: Interrupt -> Bool -> Bus -> IO ()
 writeIF int val bus = do
@@ -451,9 +462,3 @@ writeIF int val bus = do
   let update = if val then setBit else clearBit
   _ <- writeByte 0xFF0F (b `update` bit) bus
   return ()
-
-isInterruptRequested :: Interrupt -> Bus -> IO Bool
-isInterruptRequested interrupt bus = do
-  ie <- readIE interrupt bus
-  if_ <- readIF interrupt bus
-  return $ ie && if_

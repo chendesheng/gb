@@ -1,6 +1,6 @@
 module CPUSpec (spec) where
 
-import Bus (bootRomEnabled)
+import Bus (bootRomEnabled, readByte, writeByte)
 import CPU (CPU (..), initCPU)
 import qualified PPU
 import qualified CPU
@@ -64,6 +64,33 @@ spec = describe "CPU" $ do
     cpu <- testCPU
     (cpu1, _) <- executeOneCPUInstruction cpu
     cpu1.registers.rSP `shouldBe` 0xFFFE
+  it "cancels interrupt dispatch when pushing PC high changes IE" $ do
+    cpu <- initCPU (BL.pack $ 0xFB : Prelude.replicate 255 0) (BL.replicate 0x8000 0)
+    -- Execute EI and NOP so the interrupt enable delay has elapsed.
+    (cpu1, _) <- executeOneCPUInstruction cpu
+    (cpu2, _) <- executeOneCPUInstruction cpu1
+    let start = cpu2 {registers = cpu2.registers {rPC = 0x0200, rSP = 0x0000}}
+    _ <- writeByte 0xFFFF 0x04 start.bus -- Enable Timer.
+    _ <- writeByte 0xFF0F 0x04 start.bus -- Request Timer.
+    _ <- writeByte 0xFFFE 0xAA start.bus
+    let runService elapsed state
+          | elapsed == 20 = return state
+          | otherwise = do
+              (state', cycles) <- CPU.execute state
+              cycles `shouldSatisfy` (> 0)
+              let elapsed' = elapsed + fromIntegral cycles
+              elapsed' `shouldSatisfy` (<= 20)
+              state'.currentInstruction `shouldBe` Nothing
+              runService elapsed' state'
+    cpu3 <- runService (0 :: Int) start
+    -- The high-byte push wraps SP to IE and writes 0x02, disabling Timer.
+    -- Dispatch is cancelled, but both PC bytes must still be pushed.
+    readByte 0xFFFF cpu3.bus `shouldReturn` 0x02
+    readByte 0xFFFE cpu3.bus `shouldReturn` 0x00
+    readByte 0xFF0F cpu3.bus `shouldReturn` 0x04
+    cpu3.registers.rPC `shouldBe` 0x0000
+    cpu3.registers.rSP `shouldBe` 0xFFFE
+    cpu3.ime `shouldBe` cpu.ime
   it "execute boot rom" $ do
     cpu <- testCPU
     let ppu = initPPU cpu.bus

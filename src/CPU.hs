@@ -132,15 +132,6 @@ push8Low = push8 . lowByte
 toWord16 :: Word8 -> Word8 -> Word16
 toWord16 l h = (fromIntegral h .<<. 8) .|. fromIntegral l
 
-pop16 :: CPU -> IO (CPU, Word16)
-pop16 cpu = do
-  let regs = cpu.registers
-      bus = cpu.bus
-      sp = regs.rSP
-  l <- readByte sp bus
-  h <- readByte (sp + 1) bus
-  return (cpu {registers = regs {rSP = sp + 2}}, fromWord8s h l)
-
 pop8 :: CPU -> IO (CPU, Word8)
 pop8 cpu = do
   let regs = cpu.registers

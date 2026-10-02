@@ -1,6 +1,6 @@
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 {-# LANGUAGE BangPatterns #-}
-module PPU (execute, FIFOPixel(..), PPU(..), initPPU) where
+module PPU (execute, FIFOPixel(..), PPU(..), Display(..), initPPU) where
 
 import Prelude hiding (replicate)
 import Control.Monad (when)
@@ -82,7 +82,7 @@ data PPU = PPU
   , mode :: PPUMode
   , lcdOn :: Bool
   , display :: Display
-  , selectedOAMObjects :: Vector SelectedOAMObject -- up to 10, reversed
+  , selectedOAMObjects :: !(Vector SelectedOAMObject) -- up to 10, reversed
   , bus :: Bus
   }
 

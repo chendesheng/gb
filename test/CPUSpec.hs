@@ -1,8 +1,9 @@
 module CPUSpec (spec) where
 
-import Bus (Bus (..), bootRomEnabled)
-import CPU (CPU (..), execute1, initCPU)
+import Bus (bootRomEnabled)
+import CPU (CPU (..), initCPU)
 import qualified PPU
+import qualified CPU
 import PPU (PPU, initPPU)
 import Data.ByteString.Lazy as BL
 import Data.Word
@@ -43,15 +44,25 @@ execute endPred cpu ppu = do
   if end
     then return (cpu, ppu)
     else do
-      (cpu', cycles) <- execute1 cpu
+      (cpu', cycles) <- CPU.execute cpu
       ppu' <- PPU.execute cycles ppu
       execute endPred cpu' ppu'
+
+
+executeOneCPUInstruction :: CPU -> IO (CPU, Word8)
+executeOneCPUInstruction = go 0
+  where
+      go elapsed cpu = do
+          (cpu1, elapsed1) <- CPU.execute cpu
+          case cpu1.currentInstruction of
+            Nothing -> return (cpu1, elapsed + elapsed1)
+            _ -> go (elapsed + elapsed1) cpu1
 
 spec :: SpecWith ()
 spec = describe "CPU" $ do
   it "execute first instruction" $ do
     cpu <- testCPU
-    (cpu1, _) <- execute1 cpu
+    (cpu1, _) <- executeOneCPUInstruction cpu
     cpu1.registers.rSP `shouldBe` 0xFFFE
   it "execute boot rom" $ do
     cpu <- testCPU

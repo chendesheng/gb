@@ -10,6 +10,7 @@ import Data.Vector (Vector, replicate, toList, snoc, modify, (//), (!))
 import Data.Vector.Algorithms.Intro (sort)
 import Data.Word
 import Queue hiding (toList)
+import Data.List.Split (chunksOf)
 
 
 -- One dot = one PPU clock. One scanline = 456 dots. One frame = 154 lines = 70224 dots.
@@ -40,17 +41,34 @@ data FIFOPixel = FIFOPixel
 
 instance Show Display where
   show (Display pixels) =
-    unlines $ toList $ fmap showRow pixels
+    let rows = chunksOf 2 $ fmap toList (toList pixels)
+    in
+    unlines (fmap showRow rows)
     where
-      showRow :: Vector Color -> String
-      showRow = toList . fmap showPixel
+      showRow :: [[Color]] -> String
+      showRow [r1, r2] = concat (zipWith showPixel r1 r2) ++ "\ESC[0m"
+      showRow _ = ""
 
-      showPixel :: Color -> Char
-      -- change to use terminal color rect (unicode rect with terminal color) instead
-      showPixel Blank = '\x2588'
-      showPixel LightGray = '\x2591'
-      showPixel DarkGray = '\x2592'
-      showPixel Black = '\x2593'
+      showPixel :: Color -> Color -> String
+      showPixel t b = ansiBackground t ++ ansiForeground b ++ "▄"
+
+      ansiForeground :: Color -> String
+      ansiForeground Blank = "\ESC[38;5;15m"
+      ansiForeground LightGray = "\ESC[38;5;7m"
+      ansiForeground DarkGray = "\ESC[38;5;8m"
+      ansiForeground Black = "\ESC[38;5;0m"
+
+      ansiBackground :: Color -> String
+      ansiBackground Blank = "\ESC[48;5;15m"
+      ansiBackground LightGray = "\ESC[48;5;7m"
+      ansiBackground DarkGray = "\ESC[48;5;8m"
+      ansiBackground Black = "\ESC[48;5;0m"
+
+      -- -- change to use ANSI escape sequence + unicode U+2588 block
+      -- showPixel Blank = "\ESC[38;5;15m\x2588"
+      -- showPixel LightGray = "\ESC[38;5;7m\x2588"
+      -- showPixel DarkGray = "\ESC[38;5;8m\x2588"
+      -- showPixel Black = "\ESC[38;5;0m\x2588"
 
 -- color :: Pixel -> Word32
 -- color 0 = 0x9BBC0F

@@ -33,7 +33,11 @@ import Registers
 
 data CPU = CPU {registers :: Registers, bus :: Bus, ime :: InterruptStep, currentInstruction :: Maybe OpCode }
 
-data InterruptStep = Disabled | PendingEnable | GetIntRequest | Enabled InterruptServiceStep  deriving (Eq, Show)
+data InterruptStep
+  = Disabled
+  | EnableAfterNextInstruction
+  | GetIntRequest
+  | Enabled InterruptServiceStep  deriving (Eq, Show)
 data InterruptServiceStep = IntSrvWriteSPHigh | IntSrvWriteSPLow | IntSrvJmp Interrupts deriving (Eq, Show)
 
 initCPU :: BL.ByteString -> BL.ByteString -> IO CPU
@@ -80,7 +84,7 @@ execute cpu = do
 executeInterruption :: CPU -> IO (CPU, Word8)
 executeInterruption cpu = do
   case cpu.ime of
-    PendingEnable -> return (cpu{ime=GetIntRequest}, 0)
+    EnableAfterNextInstruction -> return (cpu{ime=GetIntRequest}, 0)
     GetIntRequest -> do
       ie <- readIE cpu.bus
       if_ <- readIF cpu.bus
@@ -389,8 +393,8 @@ executeInstruction cpu op = do
           val'
       return (cpu {registers = regs'}, 0)
     EI -> return (cpu {ime = case cpu.ime of
-                                Disabled -> PendingEnable
-                                PendingEnable -> PendingEnable
+                                Disabled -> EnableAfterNextInstruction
+                                EnableAfterNextInstruction -> EnableAfterNextInstruction
                                 _ ->  cpu.ime
                                 }, 0)
     DI -> return (cpu {ime = Disabled}, 0)

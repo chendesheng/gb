@@ -2,12 +2,13 @@ module InstructionSpec (spec) where
 
 import Bus (readByte, readByteHighMemory, readR16, writeR8, writeByte, writeR16, writeByteHighMemory)
 import CPU (CPU (..), executeInstruction, initCPU)
+import qualified CPU
 import Control.Monad (foldM)
 import Data.Binary.Get (runGet)
 import Data.Maybe (fromJust)
 import Data.ByteString.Lazy as BL
 import Data.Word
-import Instruction (ALUOp (..), CBOp (..), OpCode (..), SubOp(..), instructionDecoder)
+import Instruction
 import qualified Instruction as I
 import Registers
 import Test.Hspec
@@ -118,7 +119,7 @@ spec = describe "Instruction" $ do
   it "CALL_addr16 0x1234" $ do
     cpu <- cpuInitPC 0x0003 <$> testCPU
     (cpu1, 0) <- executeInstruction cpu $ LD_r16_imm16 SP 0xFFFE
-    (cpu2, 12) <- executeInstruction cpu1 $ CALL_addr16 0x1234
+    (cpu2, 12) <- executeInstructionSteps cpu1 $ CALL_addr16 SubOpCallWait 0x1234
     cpu2.registers.rSP `shouldBe` 0xFFFC
     cpu2.registers.rPC `shouldBe` 0x1234
     l <- readByte 0xFFFC cpu.bus
@@ -128,17 +129,17 @@ spec = describe "Instruction" $ do
   it "RET" $ do
     cpu <- cpuInitPC 0x0003 <$> testCPU
     (cpu1, 0) <- executeInstruction cpu $ LD_r16_imm16 SP 0xFFFE
-    (cpu2, 12) <- executeInstruction cpu1 $ CALL_addr16 0x1234
+    (cpu2, 12) <- executeInstructionSteps cpu1 $ CALL_addr16 SubOpCallWait 0x1234
     cpu2.registers.rSP `shouldBe` 0xFFFC
     cpu2.registers.rPC `shouldBe` 0x1234
-    (cpu3, 12) <- executeInstruction cpu2 RET
+    (cpu3, 12) <- executeInstructionSteps cpu2 $ RET SubOpPopLow
     cpu3.registers.rPC `shouldBe` 0x0003
     cpu3.registers.rSP `shouldBe` 0xFFFE
   it "PUSH BCstk" $ do
     cpu <- testCPU
     cpu2 <- cpuInitR8 [(B, 0x12), (C, 0xA0)] cpu
     (cpu3, 0) <- executeInstruction cpu2 $ LD_r16_imm16 SP 0xFFFE
-    (cpu4, 12) <- executeInstruction cpu3 $ PUSH BCstk
+    (cpu4, 12) <- executeInstructionSteps cpu3 $ PUSH SubOpPushWait BCstk
     cpu4.registers.rSP `shouldBe` 0xFFFC
     l <- readByte 0xFFFC cpu.bus
     l `shouldBe` 0xA0
@@ -161,8 +162,19 @@ spec = describe "Instruction" $ do
   it "POP AFstk" $ do
     cpu <-  cpuSetFlags 0x80 <$> (testCPU >>= cpuWriteR8 A 0x80)
     cpu1 <- cpuWriteR16 SP 0xFFF0 cpu
-    (cpu2, 8) <- executeInstruction cpu1 $ POP AFstk
+    _ <- writeByte 0xFFF0 0xBF cpu1.bus
+    _ <- writeByte 0xFFF1 0x12 cpu1.bus
+    (cpu2, 8) <- executeInstructionSteps cpu1 $ POP SubOpPopLow AFstk
     cpu2.registers.rSP `shouldBe` 0xFFF2
+    cpu2.registers.rA `shouldBe` 0x12
+    cpu2.registers.rF `shouldBe` 0xB0
+  it "POP BCstk" $ do
+    cpu <- testCPU >>= cpuWriteR16 SP 0xFFF0
+    _ <- writeByte 0xFFF0 0x34 cpu.bus
+    _ <- writeByte 0xFFF1 0x12 cpu.bus
+    (cpu1, 8) <- executeInstructionSteps cpu $ POP SubOpPopLow BCstk
+    cpu1.registers.rSP `shouldBe` 0xFFF2
+    getBC cpu1.registers `shouldBe` 0x1234
   it "ALU_A_imm8 CP 0x34" $ do
     cpu <- testCPU >>= cpuWriteR8 A 0x30
     (cpu1, 0) <- executeInstruction cpu $ ALU_A_imm8 CP 0x34
@@ -177,6 +189,17 @@ spec = describe "Instruction" $ do
     _ <- writeByteHighMemory 0x10 0xBB cpu.bus
     (cpu1, 4) <- executeInstruction cpu $ LDH_A_AtImm8 0x10
     cpu1.registers.rA `shouldBe` 0xBB
+
+-- Run execution steps only; these tests start after instruction fetching.
+executeInstructionSteps :: CPU -> OpCode -> IO (CPU, Word8)
+executeInstructionSteps cpu op = go 0 cpu{currentInstruction = Just op}
+  where
+    go elapsed state = do
+      (state', cycles) <- CPU.execute state
+      let elapsed' = elapsed + cycles
+      case state'.currentInstruction of
+        Nothing -> return (state', elapsed')
+        Just _ -> go elapsed' state'
 
 cpuSetFlags :: Word8 -> CPU -> CPU
 cpuSetFlags f cpu =

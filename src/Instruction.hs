@@ -10,7 +10,10 @@ module Instruction
     R16Mem (..),
     ALUOp (..),
     CBOp (..),
-    SubOp (..),
+    SubOpMem (..),
+    SubOpCall (..),
+    SubOpPop (..),
+    SubOpPush (..),
   )
 where
 
@@ -34,8 +37,8 @@ data CBOp
   | SWAP R8
   | SRL R8
   | BIT Word8 R8
-  | RES SubOp Word8 R8
-  | SET SubOp Word8 R8
+  | RES SubOpMem Word8 R8
+  | SET SubOpMem Word8 R8
   deriving (Show, Eq)
 
 data RstTarget
@@ -49,8 +52,12 @@ data RstTarget
   | RST38
   deriving (Show, Eq)
 
-data SubOp = SubOpRead | SubOpWrite Word8
+data SubOpMem = SubOpRead | SubOpWrite Word8
   deriving (Show, Eq)
+
+data SubOpCall = SubOpCallWait | SubOpCallPushHigh | SubOpCallJmp deriving (Show, Eq)
+data SubOpPop = SubOpPopLow | SubOpPopHigh Word8 deriving (Show, Eq)
+data SubOpPush = SubOpPushWait | SubOpPushHigh | SubOpPushLow deriving (Show, Eq)
 
 data OpCode
   = ADD_HL_r16 R16
@@ -58,17 +65,17 @@ data OpCode
   | ALU_A_R8 ALUOp R8
   | ALU_A_imm8 ALUOp Word8
   | CALL_cond_imm16 Cond Word16
-  | CALL_addr16 Word16
+  | CALL_addr16 SubOpCall Word16
   | CCF
   | CPL
   | DAA
   | DEC_r16 R16
-  | DEC_r8 SubOp R8
+  | DEC_r8 SubOpMem R8
   | DI
   | EI
   | HALT
   | INC_r16 R16
-  | INC_r8 SubOp R8
+  | INC_r8 SubOpMem R8
   | INVALID Word8
   | JP_HL
   | JP_cond_imm16 Cond Word16
@@ -90,10 +97,10 @@ data OpCode
   | LD_r8_imm8 R8 Word8
   | LD_r8_r8 R8 R8
   | NOP
-  | POP R16Stk
+  | POP SubOpPop R16Stk
   | PREFIX_CB CBOp
-  | PUSH R16Stk
-  | RET
+  | PUSH SubOpPush R16Stk
+  | RET SubOpPop
   | RETI
   | RET_cond Cond
   | RLA
@@ -177,13 +184,13 @@ opCodeDecoder = do
     0x90 -> return $ ALU_A_R8 SUB B
     0xaf -> return $ ALU_A_R8 XOR A
     0xbe -> return $ ALU_A_R8 CP AtHL
-    0xc1 -> return $ POP BCstk
-    0xc5 -> return $ PUSH BCstk
-    0xc9 -> return RET
+    0xc1 -> return $ POP SubOpPopLow BCstk
+    0xc5 -> return $ PUSH SubOpPushWait BCstk
+    0xc9 -> return $ RET SubOpPopLow
     0xcb -> PREFIX_CB <$> cbOpDecoder
     0xce -> ALU_A_imm8 ADC <$> getWord8
     0xcc -> CALL_cond_imm16 Z <$> getWord16le
-    0xcd -> CALL_addr16 <$> getWord16le
+    0xcd -> CALL_addr16 SubOpCallWait <$> getWord16le
     0xe0 -> LDH_AtImm8_A <$> getWord8
     0xea -> LD_Addr16_A <$> getWord16le
     0xe2 -> return LDH_AtC_A

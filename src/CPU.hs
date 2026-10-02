@@ -90,11 +90,11 @@ executeInterruption cpu = do
                 (cpu{ime=Enabled IntSrvWriteSPHigh}, 8)
     Enabled IntSrvWriteSPHigh -> do
       let addr = cpu.registers.rPC
-      cpu' <- push8 (addr .>>. 8 .&. 0xFF & fromIntegral) cpu
+      cpu' <- push8High addr cpu
       return (cpu'{ime=Enabled IntSrvWriteSPLow}, 4)
     Enabled IntSrvWriteSPLow -> do
       ie <- readIE cpu.bus
-      cpu' <- push8 (fromIntegral cpu.registers.rPC) cpu
+      cpu' <- push8Low cpu.registers.rPC cpu
       return (cpu'{ime=Enabled $ IntSrvJmp ie }, 4)
     Enabled (IntSrvJmp ie) -> do
       if_ <- readIF cpu.bus
@@ -119,6 +119,12 @@ push8 val cpu = do
   _ <- writeByte sp val bus
   return cpu {registers = regs {rSP = sp}}
 
+push8High :: Word16 -> CPU -> IO CPU
+push8High = push8 . highByte
+
+push8Low :: Word16 -> CPU -> IO CPU
+push8Low = push8 . lowByte
+
 push16 :: Word16 -> CPU -> IO CPU
 push16 val cpu = do
   let regs = cpu.registers
@@ -129,6 +135,9 @@ push16 val cpu = do
   _ <- writeByte (sp - 1) l bus
   return cpu {registers = regs {rSP = sp - 1}}
 
+toWord16 :: Word8 -> Word8 -> Word16
+toWord16 l h = (fromIntegral h .<<. 8) .|. fromIntegral l
+
 pop16 :: CPU -> IO (CPU, Word16)
 pop16 cpu = do
   let regs = cpu.registers
@@ -137,6 +146,14 @@ pop16 cpu = do
   l <- readByte sp bus
   h <- readByte (sp + 1) bus
   return (cpu {registers = regs {rSP = sp + 2}}, fromWord8s h l)
+
+pop8 :: CPU -> IO (CPU, Word8)
+pop8 cpu = do
+  let regs = cpu.registers
+      bus = cpu.bus
+      sp = regs.rSP
+  val <- readByte sp bus
+  return (cpu {registers = regs {rSP = sp + 1}}, val)
 
 callAddr16 :: Word16 -> CPU -> IO CPU
 callAddr16 addr cpu = do
@@ -147,6 +164,12 @@ callAddr16 addr cpu = do
 memoryCycles :: R8 -> Word8
 memoryCycles AtHL = 4
 memoryCycles _ = 0
+
+highByte :: Word16 -> Word8
+highByte addr = addr .>>. 8 .&. 0xFF & fromIntegral
+
+lowByte :: Word16 -> Word8
+lowByte = fromIntegral
 
 -- Return execution T-cycles only; instruction fetching is timed by execute.
 executeInstruction :: CPU -> OpCode -> IO (CPU, Word8)
@@ -330,19 +353,40 @@ executeInstruction cpu op = do
       val <- readByte addr bus
       regs' <- writeR8 regs bus A val
       return (cpu {registers = updateR16MemHL src regs'}, 4)
-    CALL_addr16 addr -> do
-      cpu' <- callAddr16 addr cpu
-      return (cpu', 12)
-    RET -> do
-      (cpu', pc) <- pop16 cpu
-      return (cpu {registers = cpu'.registers {rPC = pc}}, 12)
-    PUSH stk -> do
+    CALL_addr16 SubOpCallWait addr ->
+      return (cpu {currentInstruction=Just (CALL_addr16 SubOpCallPushHigh addr)}, 4)
+    CALL_addr16 SubOpCallPushHigh addr -> do
+      cpu' <- push8High cpu.registers.rPC cpu
+      return (cpu'{currentInstruction=Just (CALL_addr16 SubOpCallJmp addr)}, 4)
+    CALL_addr16 SubOpCallJmp addr -> do
+      cpu' <- push8Low cpu.registers.rPC cpu
+      return (cpu'{registers=cpu'.registers{rPC=addr}}, 4)
+    RET SubOpPopLow -> do
+      (cpu', low) <- pop8 cpu
+      return (cpu'{currentInstruction=Just (RET $ SubOpPopHigh low)}, 4)
+    RET (SubOpPopHigh low) -> do
+      (cpu', high) <- pop8 cpu
+      let pc = toWord16 low high
+      return (cpu{registers = cpu'.registers {rPC = pc}}, 8)
+    PUSH SubOpPushWait stk -> do
+      return (cpu{currentInstruction=Just (PUSH SubOpPushHigh stk)}, 4)
+    PUSH SubOpPushHigh stk -> do
       let val = getR16Stk stk regs
-      cpu' <- push16 val cpu
-      return (cpu', 12)
-    POP stk -> do
-      (cpu', val) <- pop16 cpu
-      return (cpu {registers = setR16Stk stk val cpu'.registers}, 8)
+      cpu' <- push8High val cpu
+      return (cpu'{currentInstruction=Just (PUSH SubOpPushLow stk)}, 4)
+    PUSH SubOpPushLow stk -> do
+      let val = getR16Stk stk regs
+      cpu' <- push8Low val cpu
+      return (cpu', 4)
+    POP SubOpPopLow stk -> do
+      (cpu', low) <- pop8 cpu
+      return (cpu'{currentInstruction=Just (POP (SubOpPopHigh low) stk)}, 4)
+    POP (SubOpPopHigh low) AFstk -> do
+      (cpu', high) <- pop8 cpu
+      return (cpu {registers = setR16Stk AFstk (toWord16 (low .&. 0xF0) high) cpu'.registers}, 4)
+    POP (SubOpPopHigh low) stk -> do
+      (cpu', high) <- pop8 cpu
+      return (cpu {registers = setR16Stk stk (toWord16 low high) cpu'.registers}, 4)
     RLA -> do
       val <- readR8 regs bus A
       let c = cflag regs

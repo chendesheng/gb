@@ -3,7 +3,6 @@
 module Instruction
   ( Instruction (..),
     OpCode (..),
-    Cycles (..),
     instructionDecoder,
     R16 (..),
     R8 (..),
@@ -104,14 +103,8 @@ data OpCode
 
 data Instruction = Instruction
   { op :: OpCode,
-    len :: Word8,
-    cycles :: Cycles
+    len :: Word8
   }
-  deriving (Show, Eq)
-
-data Cycles
-  = Fixed Word8
-  | Branch Word8 Word8 -- not taken, taken
   deriving (Show, Eq)
 
 cbOpDecoder :: Get CBOp
@@ -200,69 +193,9 @@ opCodeDecoder = do
 
 -- _ -> todo $ "unknown opcode: 0x" ++ showHex b ""
 
-cyclesOf :: OpCode -> Cycles
-cyclesOf opcode =
-  case opcode of
-    ALU_A_R8 _ AtHL -> Fixed 8
-    ALU_A_R8 _ _ -> Fixed 4
-    ALU_A_imm8 _ _ -> Fixed 8
-    CALL_cond_imm16 _ _ -> Branch 12 24
-    CALL_addr16 _ -> Fixed 24
-    CCF -> Fixed 4
-    CPL -> Fixed 4
-    DAA -> Fixed 4
-    DEC_r16 _ -> Fixed 8
-    DEC_r8 AtHL -> Fixed 12
-    DEC_r8 _ -> Fixed 4
-    INC_r16 _ -> Fixed 8
-    INC_r8 AtHL -> Fixed 12
-    INC_r8 _ -> Fixed 4
-    INVALID _ -> Fixed 0
-    JR_cond_imm8 _ _ -> Branch 8 12
-    JR_imm8 _ -> Fixed 12
-    LDH_A_C -> Fixed 8
-    LDH_A_AtImm8 _ -> Fixed 12
-    LDH_AtImm8_A _ -> Fixed 12
-    LDH_AtC_A -> Fixed 8
-    LD_A_AtR16mem _ -> Fixed 8
-    LD_Addr16_A _ -> Fixed 16
-    LD_imm16_SP _ -> Fixed 20
-    LD_r16_imm16 _ _ -> Fixed 12
-    LD_AtR16mem_A _ -> Fixed 8
-    LD_r8_imm8 AtHL _ -> Fixed 12
-    LD_r8_imm8 _ _ -> Fixed 8
-    LD_r8_r8 AtHL _ -> Fixed 8
-    LD_r8_r8 _ AtHL -> Fixed 8
-    LD_r8_r8 _ _ -> Fixed 4
-    NOP -> Fixed 4
-    POP _ -> Fixed 12
-    PUSH _ -> Fixed 16
-    RET -> Fixed 16
-    RLA -> Fixed 4
-    RLCA -> Fixed 4
-    RRA -> Fixed 4
-    RRCA -> Fixed 4
-    SCF -> Fixed 4
-    PREFIX_CB (BIT _ AtHL) -> Fixed 12
-    PREFIX_CB (RES _ AtHL) -> Fixed 16
-    PREFIX_CB (RL AtHL) -> Fixed 16
-    PREFIX_CB (RLC AtHL) -> Fixed 16
-    PREFIX_CB (RR AtHL) -> Fixed 16
-    PREFIX_CB (RRC AtHL) -> Fixed 16
-    PREFIX_CB (SET _ AtHL) -> Fixed 16
-    PREFIX_CB (SLA AtHL) -> Fixed 16
-    PREFIX_CB (SRA AtHL) -> Fixed 16
-    PREFIX_CB (SRL AtHL) -> Fixed 16
-    PREFIX_CB (SWAP AtHL) -> Fixed 16
-    PREFIX_CB _ -> Fixed 8
-    EI -> Fixed 4
-    DI -> Fixed 4
-    RETI -> Fixed 16
-    _ -> error $ "missing cycles for " ++ show opcode
-
 instructionDecoder :: Get Instruction
 instructionDecoder = do
   start <- bytesRead
   opcodes <- opCodeDecoder
   end <- bytesRead
-  return $ Instruction opcodes (fromIntegral $ end - start) $ cyclesOf opcodes
+  return $ Instruction opcodes (fromIntegral $ end - start)

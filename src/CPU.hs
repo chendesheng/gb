@@ -125,16 +125,6 @@ push8High = push8 . highByte
 push8Low :: Word16 -> CPU -> IO CPU
 push8Low = push8 . lowByte
 
-push16 :: Word16 -> CPU -> IO CPU
-push16 val cpu = do
-  let regs = cpu.registers
-      bus = cpu.bus
-      sp = regs.rSP - 1
-      (h, l) = toWord8s val
-  _ <- writeByte sp h bus
-  _ <- writeByte (sp - 1) l bus
-  return cpu {registers = regs {rSP = sp - 1}}
-
 toWord16 :: Word8 -> Word8 -> Word16
 toWord16 l h = (fromIntegral h .<<. 8) .|. fromIntegral l
 
@@ -154,12 +144,6 @@ pop8 cpu = do
       sp = regs.rSP
   val <- readByte sp bus
   return (cpu {registers = regs {rSP = sp + 1}}, val)
-
-callAddr16 :: Word16 -> CPU -> IO CPU
-callAddr16 addr cpu = do
-  let regs = cpu.registers
-  cpu' <- push16 regs.rPC cpu
-  return cpu' {registers = cpu'.registers {rPC = addr}}
 
 memoryCycles :: R8 -> Word8
 memoryCycles AtHL = 4
@@ -410,8 +394,12 @@ executeInstruction cpu op = do
                                 _ ->  cpu.ime
                                 }, 0)
     DI -> return (cpu {ime = Disabled}, 0)
-    RETI -> do
-      -- RET + EI
-      (cpu', pc) <- pop16 cpu
-      return (cpu {registers = cpu'.registers {rPC = pc}, ime = GetIntRequest}, 12)
+    RETI SubOpPopLow -> do
+      (cpu', low) <- pop8 cpu
+      return (cpu'{currentInstruction=Just (RETI $ SubOpPopHigh low)}, 4)
+    RETI (SubOpPopHigh low) -> do
+      -- RET + enable IME
+      (cpu', high) <- pop8 cpu
+      let pc = toWord16 low high
+      return (cpu'{registers = cpu'.registers {rPC = pc}, ime = GetIntRequest}, 8)
     _ -> todo $ "execute instruction op " ++ show op

@@ -101,7 +101,7 @@ data OpCode
   | PREFIX_CB CBOp
   | PUSH SubOpPush R16Stk
   | RET SubOpPop
-  | RETI
+  | RETI SubOpPop
   | RET_cond Cond
   | RLA
   | RLCA
@@ -200,7 +200,7 @@ opCodeDecoder = do
     0xdd -> return $ INVALID b
     0xFB -> return EI
     0xF3 -> return DI
-    0xD9 -> return RETI
+    0xD9 -> return $ RETI SubOpPopLow
     _ -> return $ INVALID b
 
 -- _ -> todo $ "unknown opcode: 0x" ++ showHex b ""

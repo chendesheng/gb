@@ -64,18 +64,6 @@ instance Show Display where
       ansiBackground DarkGray = "\ESC[48;5;8m"
       ansiBackground Black = "\ESC[48;5;0m"
 
-      -- -- change to use ANSI escape sequence + unicode U+2588 block
-      -- showPixel Blank = "\ESC[38;5;15m\x2588"
-      -- showPixel LightGray = "\ESC[38;5;7m\x2588"
-      -- showPixel DarkGray = "\ESC[38;5;8m\x2588"
-      -- showPixel Black = "\ESC[38;5;0m\x2588"
-
--- color :: Pixel -> Word32
--- color 0 = 0x9BBC0F
--- color 1 = 0x8BAC0F
--- color 2 = 0x306230
--- color _ = 0x0F380F
-
 data PPU = PPU
   { x :: Word16
   , y :: Word8
@@ -83,6 +71,8 @@ data PPU = PPU
   , lcdOn :: Bool
   , display :: Display
   , selectedOAMObjects :: !(Vector SelectedOAMObject) -- up to 10, reversed
+  , windowLine :: Word8
+  , windowYTriggered :: Bool -- the "Y condition"
   , bus :: Bus
   }
 
@@ -101,7 +91,7 @@ instance Ord SelectedOAMObject where
       others -> others
 
 initPPU :: Bus -> PPU
-initPPU = PPU 0 0 HorizontalBlank False initDisplay mempty
+initPPU = PPU 0 0 HorizontalBlank False initDisplay mempty 0 False
 
 -- newtype Tile = Tile (Vector Word8) -- length 16
 
@@ -112,10 +102,16 @@ data PPUMode
   | DrawingPixels
       { fetcherStep :: FIFOPixelFetcherStep
       , fetcherX :: Word8
-      , screenX :: Maybe Int
+      , screenX :: Int
       , oam :: Queue FIFOPixel
       , background :: Queue FIFOPixel
+      , windowXTriggered :: Bool
+      , windowLine :: Word8
+      , fetcherSource :: FIFOFetcherSource
       }
+
+initFIFOPixelFetcher :: FIFOPixelFetcherStep
+initFIFOPixelFetcher = GetTileIndex 0
 
 instance Eq PPUMode where
   HorizontalBlank == HorizontalBlank = True
@@ -124,18 +120,20 @@ instance Eq PPUMode where
   DrawingPixels {} == DrawingPixels {} = True
   _ == _ = False
 
+data FIFOFetcherSource = Background | Window deriving (Eq, Show)
+
 data FIFOPixelFetcherStep
   = GetTileIndex Int
-  | GetTileDataLow Int TileIndex
-  | GetTileDataHigh Int TileIndex Word8
+  | GetTileDataLow Int FIFOFetcherSource TileIndex
+  | GetTileDataHigh Int FIFOFetcherSource TileIndex Word8
   | Sleep Int TileRow
   | Push TileRow
 
 initOAMScan :: PPUMode
 initOAMScan = OAMScan Nothing
 
-initDrawingPixels :: PPUMode
-initDrawingPixels = DrawingPixels (GetTileIndex 0) 0 Nothing mempty mempty
+initDrawingPixels :: Int -> PPUMode
+initDrawingPixels screenX = DrawingPixels initFIFOPixelFetcher 0 screenX mempty mempty False 0 Background
 
 toIntMode :: PPUMode -> Word8
 toIntMode HorizontalBlank = 0
@@ -154,7 +152,8 @@ step ppu = do
       pos <- readOAMEntry i ppu.bus
       let mode = OAMScan (Just $ SelectedOAMObject i pos)
       let selected = if i == 0 then mempty else ppu.selectedOAMObjects
-      return $ ppu{mode=mode, selectedOAMObjects=selected}
+      ppu' <- updateYTriggered ppu
+      return $ ppu'{mode=mode, selectedOAMObjects=selected}
     OAMScan (Just pending) -> do
       -- `LY` falls within `[Y - 16, Y - 16 + height)`
       height <- readLcdCObjSize bus
@@ -165,79 +164,142 @@ step ppu = do
                      else
                         modify sort ppu.selectedOAMObjects
 
-      let mode = if ppu.x == 79 then initDrawingPixels else OAMScan Nothing
-      return $ ppu{mode=mode, selectedOAMObjects=selected}
-    DrawingPixels fetcherStep fetcherX screenX oam bg -> do
+      ppu' <- if ppu.x == 79 then do
+                  mode <- initDrawingPixels <$> initScreenX bus
+                  wx <- readWXInt bus
+                  bgEnable <- isLcdCBgEnable bus
+                  windowEnable <- isLcdCWindowEnable bus
+                  if wx == 0 && bgEnable && windowEnable && ppu.windowYTriggered then
+                    activeWindow wx ppu{mode=mode}
+                  else return $ ppu{mode=mode}
+              else return $ ppu{mode=OAMScan Nothing}
+      return $ ppu'{selectedOAMObjects=selected}
+    DrawingPixels {} -> do
       bgEnable <- isLcdCBgEnable bus
       if bgEnable then do
-        ppu' <- executeFetcherStep ppu
-        render ppu'
+        windowEnable <- isLcdCWindowEnable bus
+        ppu1 <- if windowEnable then tryActiveWindow ppu ppu.mode else return ppu
+        let windowActive = windowEnable && ppu1.windowYTriggered && ppu1.mode.windowXTriggered
+        ppu2 <- executeFetcherStep ppu1 ppu1.mode windowActive
+        render ppu2 ppu2.mode
       else
         -- TODO
         return ppu
       where
-        render ppu =
-            case ppu.mode of
-              DrawingPixels a b maybeScreenX d bg ->
-                case dequeue bg of
-                  Just (pixel, bg') -> do
-                    screenX <- resolveScreenX maybeScreenX
-                    if screenX < 0 then
-                      return ppu{mode=DrawingPixels a b (Just $ screenX + 1) d bg'}
-                    else do
-                      palette <- readBGPalette bus
-                      let color = getColor pixel.color palette
-                      let !display' = renderPixel ppu.y (fromIntegral screenX) color ppu.display
-                      let screenX' = screenX + 1
-                      if screenX' == 160 then
-                        return ppu{mode=HorizontalBlank, display=display'}
-                      else
-                        return ppu{mode=DrawingPixels a b (Just screenX') d bg', display=display'}
-                  _ ->
-                    return ppu
-                where
-                  resolveScreenX :: Maybe Int -> IO Int
-                  resolveScreenX Nothing = do
-                    scx <- readSCX bus
-                    return $ -(fromIntegral $ scx `mod` 8)
-                  resolveScreenX (Just sx) = return sx
-              _ -> return ppu
+        tryActiveWindow ppu mode@(DrawingPixels{}) = do
+          if ppu.windowYTriggered && not mode.windowXTriggered then do
+            wx <- readWXInt bus
+            let windowXTriggered = wx > 0 && (wx < 7 && (mode.screenX == 0) || wx - 7 == mode.screenX)
+            if windowXTriggered then activeWindow wx ppu
+            else return ppu
+          else return ppu
+        tryActiveWindow ppu _ = return ppu
 
-        executeFetcherStep ppu =
-            case fetcherStep of
+        render ppu mode@(DrawingPixels{screenX=screenX}) =
+          case dequeue mode.background of
+            Just (pixel, background) -> do
+              if mode.screenX < 0 then do
+                return ppu{mode=mode{screenX=screenX + 1, background=background}}
+              else do
+                palette <- readBGPalette bus
+                let color = getColor pixel.color palette
+                let !display' = renderPixel ppu.y (fromIntegral screenX) color ppu.display
+                let screenX' = screenX + 1
+                let mode' = if screenX' == 160 then HorizontalBlank else mode{screenX=screenX', background=background}
+                return ppu{mode=mode', display=display'}
+            _ -> return ppu
+        render ppu _ = return ppu
+
+        executeFetcherStep ppu mode@(DrawingPixels {}) windowActive =
+            case mode.fetcherStep of
               GetTileIndex 1 -> do
-                -- TODO
-                tileIndex <- readBgTileIndex ppu.y (fetcherX * 8) bus
-                return ppu{mode=DrawingPixels (GetTileDataLow 0 tileIndex) fetcherX screenX oam bg}
-              GetTileIndex _ ->
-                return ppu{mode=DrawingPixels (GetTileIndex 1) fetcherX screenX oam bg}
-              GetTileDataLow 1 tileIndex -> do
-                scy <- readSCY bus
-                low <- readBgTileRowLow tileIndex (scy + ppu.y) bus
-                return ppu{mode=DrawingPixels (GetTileDataHigh 0 tileIndex low) fetcherX screenX oam bg}
-              GetTileDataLow _ tileIndex ->
-                return ppu{mode=DrawingPixels (GetTileDataLow 1 tileIndex) fetcherX screenX oam bg}
-              GetTileDataHigh 1 tileIndex low -> do
-                scy <- readSCY bus
-                high <- readBgTileRowHigh tileIndex (scy + ppu.y) bus
-                return ppu{mode=DrawingPixels (Sleep 0 (low, high)) fetcherX screenX oam bg}
-              GetTileDataHigh _ tileIndex low ->
-                return ppu{mode=DrawingPixels (GetTileDataHigh 1 tileIndex low) fetcherX screenX oam bg}
+                tileIndex <- case mode.fetcherSource of
+                    Window -> readWindowTileIndex mode.windowLine (mode.fetcherX * 8) ppu.bus
+                    Background -> readBgTileIndex ppu.y (mode.fetcherX * 8) bus
+                return ppu{mode=mode{fetcherStep=GetTileDataLow 0 mode.fetcherSource tileIndex}}
+              GetTileIndex _ -> do
+                let source = if windowActive then Window else Background
+                mode' <- if mode.fetcherSource == Window && source == Background then do
+                              -- switch from window to background
+                              scx <- readSCXInt bus
+                              return $ mode{fetcherX=fromIntegral (scx + mode.screenX + length mode.background) `div` 8
+                                  , windowXTriggered=False
+                                  }
+                            else return mode
+                return ppu{mode=mode'{fetcherStep=GetTileIndex 1, fetcherSource=source}}
+              GetTileDataLow 1 source tileIndex -> do
+                low <- case source of
+                          Window -> readBgTileRowLow tileIndex mode.windowLine bus
+                          Background -> do
+                            scy <- readSCY bus
+                            readBgTileRowLow tileIndex (scy + ppu.y) bus
+                return ppu{mode=mode{fetcherStep=GetTileDataHigh 0 source tileIndex low}}
+              GetTileDataLow _ source tileIndex ->
+                return ppu{mode=mode{fetcherStep=GetTileDataLow 1 source tileIndex}}
+              GetTileDataHigh 1 source tileIndex low -> do
+                high <- case source of
+                          Window -> readBgTileRowHigh tileIndex mode.windowLine bus
+                          Background -> do
+                            scy <- readSCY bus
+                            readBgTileRowHigh tileIndex (scy + ppu.y) bus
+                return ppu{mode=mode{fetcherStep=Sleep 0 (low, high)}}
+              GetTileDataHigh _ source tileIndex low ->
+                return ppu{mode=mode{fetcherStep=GetTileDataHigh 1 source tileIndex low}}
               Sleep 1 tileRow ->
-                return ppu{mode=DrawingPixels (Push tileRow) fetcherX screenX oam bg}
+                return ppu{mode=mode{fetcherStep=Push tileRow}}
               Sleep _ tileRow ->
-                return ppu{mode=DrawingPixels (Sleep 1 tileRow) fetcherX screenX oam bg}
+                return ppu{mode=mode{fetcherStep=Sleep 1 tileRow}}
               Push tileRow ->
-                if isEmpty bg then do
-                  let bg' = foldl' (\acc colorIndex -> enqueue (FIFOPixel colorIndex 0 0) acc) bg (tileRowColorIndexes tileRow)
-                  return ppu{mode=DrawingPixels (GetTileIndex 0) (fetcherX + 1) screenX oam bg'}
+                if isEmpty mode.background then do
+                  let bg' = foldl' (\acc colorIndex -> enqueue (FIFOPixel colorIndex 0 0) acc)
+                                   mode.background (tileRowColorIndexes tileRow)
+                  return ppu{mode=mode{fetcherStep=initFIFOPixelFetcher, fetcherX=mode.fetcherX + 1, background=bg'}}
                 else
                   return ppu
+        executeFetcherStep ppu _ _ = return ppu
     HorizontalBlank ->
       return ppu
 
     VerticalBlank ->
-      return ppu
+      return ppu{windowYTriggered=False, windowLine=0}
+
+activeWindow :: Int -> PPU -> IO PPU
+activeWindow wx ppu =
+  case ppu.mode of
+    mode@(DrawingPixels {}) -> do
+      scx <- readSCX ppu.bus
+      let fineScroll = fromIntegral (scx `mod` 8) :: Int
+          windowScreenX
+            | wx == 0 = case fineScroll of
+                0 -> -7
+                7 -> -14
+                _ -> -(8 + fineScroll)
+            | wx < 7 = wx - 7
+            | otherwise = mode.screenX
+      return $ ppu{ windowLine = ppu.windowLine+1
+        , mode = mode
+                  {fetcherX=0
+                  , fetcherStep=initFIFOPixelFetcher
+                  , windowXTriggered=True
+                  , windowLine=ppu.windowLine
+                  , background=mempty
+                  , screenX=windowScreenX
+                  , fetcherSource=Window
+                  }}
+    _ -> return ppu
+
+initScreenX :: Bus -> IO Int
+initScreenX bus = do
+  scx <- readSCX bus
+  return $ -(fromIntegral $ scx `mod` 8)
+
+updateYTriggered :: PPU -> IO PPU
+updateYTriggered ppu =
+  if ppu.x == 0 then do
+    wy <- readWY ppu.bus
+    return $ if ppu.y == wy then ppu{windowYTriggered=True} else ppu
+  else
+    return ppu
 
 advanceXY :: PPU -> PPU
 advanceXY ppu
@@ -255,6 +317,11 @@ readBgTileIndex ly x bus = do
   let bgY = ly + scy
   let bgX = x + scx
   readTileIndex base bgY bgX bus
+
+readWindowTileIndex :: Word8 -> Word8 -> Bus -> IO TileIndex
+readWindowTileIndex windowLine x bus = do
+  base <- readLcdCWindowTileMapArea bus
+  readTileIndex base windowLine x bus
 
 syncPPUToBus :: PPU -> PPU -> IO ()
 syncPPUToBus oldPPU ppu = do
@@ -274,7 +341,7 @@ execute duration ppu = do
     (False, True) -> execute duration ppu{lcdOn=True, mode=initOAMScan}
     (True,  False) -> do
       syncPPU 0 0 ppu.bus
-      return ppu{y=0, x=0, lcdOn=False}
+      return ppu{y=0, x=0, lcdOn=False, windowYTriggered=False, windowLine=0}
     (False, False) -> return ppu
     (True, True) -> do
       ppu1 <- step ppu

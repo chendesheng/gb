@@ -14,7 +14,7 @@ module Bus
     readR16Mem,
     bootRomEnabled,
     isLcdOn,
-    readLcdCBWindowTileMapArea,
+    readLcdCWindowTileMapArea,
     isLcdCWindowEnable,
     readLcdCBgTileDataArea,
     readLcdCBgTileMapArea,
@@ -29,11 +29,13 @@ module Bus
     readMode2IntSelect,
     readSCY,
     readSCX,
+    readSCXInt,
     readBGPalette,
     readOBP0Palette,
     readOBP1Palette,
     readWY,
     readWX,
+    readWXInt,
     syncPPU,
     OAMEntry(..),
     readOAMEntry,
@@ -277,8 +279,8 @@ readLcdC index bus = do
 isLcdOn :: Bus -> IO Bool
 isLcdOn = readLcdC 7
 
-readLcdCBWindowTileMapArea :: Bus -> IO Address
-readLcdCBWindowTileMapArea bus = do
+readLcdCWindowTileMapArea :: Bus -> IO Address
+readLcdCWindowTileMapArea bus = do
   is9C00 <- readLcdC 6 bus
   return $ if is9C00 then 0x9C00 else 0x9800
 
@@ -338,6 +340,9 @@ readSCY = readByte 0xFF42
 readSCX :: Bus -> IO Word8
 readSCX = readByte 0xFF43
 
+readSCXInt :: Bus -> IO Int
+readSCXInt bus = fromIntegral <$> readSCX bus
+
 readBGPalette :: Bus -> IO ColorPalette
 readBGPalette = readByte 0xFF47
 
@@ -352,6 +357,9 @@ readWY = readByte 0xFF4A
 
 readWX :: Bus -> IO Word8
 readWX = readByte 0xFF4B
+
+readWXInt :: Bus -> IO Int
+readWXInt bus = fromIntegral <$> readWX bus
 
 -- in order make PPU state readable by CPU from Bus
 syncPPU :: Word8 -> Word8 -> Bus -> IO ()

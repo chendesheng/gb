@@ -9,7 +9,8 @@ import Color
 import Data.Vector (Vector, replicate, toList, snoc, modify, (//), (!))
 import Data.Vector.Algorithms.Intro (sort)
 import Data.Word
-import Queue hiding (toList)
+import qualified Deque.Lazy as Dq
+import Deque.Lazy (Deque)
 import Data.List.Split (chunksOf)
 
 
@@ -103,8 +104,8 @@ data PPUMode
       { fetcherStep :: FIFOPixelFetcherStep
       , fetcherX :: Word8
       , screenX :: Int
-      , oam :: Queue FIFOPixel
-      , background :: Queue FIFOPixel
+      , oam :: Deque FIFOPixel
+      , background :: Deque FIFOPixel
       , windowXTriggered :: Bool
       , windowLine :: Word8
       , fetcherSource :: FIFOFetcherSource
@@ -196,7 +197,7 @@ step ppu = do
         tryActiveWindow ppu _ = return ppu
 
         render ppu mode@(DrawingPixels{screenX=screenX}) =
-          case dequeue mode.background of
+          case Dq.uncons mode.background of
             Just (pixel, background) -> do
               if mode.screenX < 0 then do
                 return ppu{mode=mode{screenX=screenX + 1, background=background}}
@@ -250,8 +251,8 @@ step ppu = do
               Sleep _ tileRow ->
                 return ppu{mode=mode{fetcherStep=Sleep 1 tileRow}}
               Push tileRow ->
-                if isEmpty mode.background then do
-                  let bg' = foldl' (\acc colorIndex -> enqueue (FIFOPixel colorIndex 0 0) acc)
+                if Dq.null mode.background then do
+                  let bg' = foldl' (\acc colorIndex -> Dq.snoc (FIFOPixel colorIndex 0 0) acc)
                                    mode.background (tileRowColorIndexes tileRow)
                   return ppu{mode=mode{fetcherStep=initFIFOPixelFetcher, fetcherX=mode.fetcherX + 1, background=bg'}}
                 else

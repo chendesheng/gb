@@ -112,7 +112,7 @@ data PPUMode
       }
 
 initFIFOPixelFetcher :: FIFOPixelFetcherStep
-initFIFOPixelFetcher = GetTileIndex 0
+initFIFOPixelFetcher = GetTileIndexAddress
 
 instance Eq PPUMode where
   HorizontalBlank == HorizontalBlank = True
@@ -124,10 +124,12 @@ instance Eq PPUMode where
 data FIFOFetcherSource = Background | Window deriving (Eq, Show)
 
 data FIFOPixelFetcherStep
-  = GetTileIndex Int
-  | GetTileDataLow Int FIFOFetcherSource TileIndex
-  | GetTileDataHigh Int FIFOFetcherSource TileIndex Word8
-  | Sleep Int TileRow
+  = GetTileIndexAddress
+  | GetTileIndex Address
+  | GetTileDataLowAddress FIFOFetcherSource TileIndex
+  | GetTileDataLow Address FIFOFetcherSource TileIndex
+  | GetTileDataHighAddress FIFOFetcherSource TileIndex Word8
+  | GetTileDataHigh Address Word8
   | Push TileRow
 
 initOAMScan :: PPUMode
@@ -181,8 +183,8 @@ step ppu = do
         windowEnable <- isLcdCWindowEnable bus
         ppu1 <- if windowEnable then tryActiveWindow ppu ppu.mode else return ppu
         let windowActive = windowEnable && ppu1.windowYTriggered && ppu1.mode.windowXTriggered
-        ppu2 <- executeFetcherStep ppu1 ppu1.mode windowActive
-        render ppu2 ppu2.mode
+        ppu2 <- render ppu1 ppu1.mode
+        executeFetcherStep ppu2 ppu2.mode windowActive
       else
         -- TODO
         return ppu
@@ -213,51 +215,60 @@ step ppu = do
 
         executeFetcherStep ppu mode@(DrawingPixels {}) windowActive =
             case mode.fetcherStep of
-              GetTileIndex 1 -> do
-                tileIndex <- case mode.fetcherSource of
-                    Window -> readWindowTileIndex mode.windowLine (mode.fetcherX * 8) ppu.bus
-                    Background -> readBgTileIndex ppu.y (mode.fetcherX * 8) bus
-                return ppu{mode=mode{fetcherStep=GetTileDataLow 0 mode.fetcherSource tileIndex}}
-              GetTileIndex _ -> do
+              GetTileIndexAddress -> do
                 let source = if windowActive then Window else Background
                 mode' <- if mode.fetcherSource == Window && source == Background then do
                               -- switch from window to background
-                              scx <- readSCXInt bus
-                              return $ mode{fetcherX=fromIntegral (scx + mode.screenX + length mode.background) `div` 8
-                                  , windowXTriggered=False
-                                  }
+                              return $ mode{fetcherX=fromIntegral (mode.screenX + length mode.background)
+                                           , windowXTriggered=False
+                                           }
                             else return mode
-                return ppu{mode=mode'{fetcherStep=GetTileIndex 1, fetcherSource=source}}
-              GetTileDataLow 1 source tileIndex -> do
-                low <- case source of
-                          Window -> readBgTileRowLow tileIndex mode.windowLine bus
+                addr <- case source of
+                    Window -> readWindowTileIndexAddr mode'.windowLine mode'.fetcherX ppu.bus
+                    Background -> readBgTileIndexAddr ppu.y mode'.fetcherX bus
+                return ppu{mode=mode'{fetcherStep=GetTileIndex addr, fetcherSource=source}}
+              GetTileIndex addr -> do
+                tileIndex <- readVRam addr bus
+                return ppu{mode=mode{fetcherStep=GetTileDataLowAddress mode.fetcherSource tileIndex}}
+              GetTileDataLowAddress source tileIndex -> do
+                addr <- case source of
+                          Window -> readBgTileRowBaseAddress tileIndex mode.windowLine bus
                           Background -> do
                             scy <- readSCY bus
-                            readBgTileRowLow tileIndex (scy + ppu.y) bus
-                return ppu{mode=mode{fetcherStep=GetTileDataHigh 0 source tileIndex low}}
-              GetTileDataLow _ source tileIndex ->
-                return ppu{mode=mode{fetcherStep=GetTileDataLow 1 source tileIndex}}
-              GetTileDataHigh 1 source tileIndex low -> do
-                high <- case source of
-                          Window -> readBgTileRowHigh tileIndex mode.windowLine bus
+                            readBgTileRowBaseAddress tileIndex (scy + ppu.y) bus
+                return ppu{mode=mode{fetcherStep=GetTileDataLow addr source tileIndex}}
+              GetTileDataLow addr source tileIndex -> do
+                low <- readVRam addr bus
+                return ppu{mode=mode{fetcherStep=GetTileDataHighAddress source tileIndex low}}
+              GetTileDataHighAddress source tileIndex low -> do
+                addr <- case source of
+                          Window -> readBgTileRowBaseAddress tileIndex mode.windowLine bus
                           Background -> do
                             scy <- readSCY bus
-                            readBgTileRowHigh tileIndex (scy + ppu.y) bus
-                return ppu{mode=mode{fetcherStep=Sleep 0 (low, high)}}
-              GetTileDataHigh _ source tileIndex low ->
-                return ppu{mode=mode{fetcherStep=GetTileDataHigh 1 source tileIndex low}}
-              Sleep 1 tileRow ->
-                return ppu{mode=mode{fetcherStep=Push tileRow}}
-              Sleep _ tileRow ->
-                return ppu{mode=mode{fetcherStep=Sleep 1 tileRow}}
+                            readBgTileRowBaseAddress tileIndex (scy + ppu.y) bus
+                return ppu{mode=mode{fetcherStep=GetTileDataHigh (addr + 1) low}}
+              GetTileDataHigh addr low -> do
+                high <- readVRam addr bus
+                let tileRow = (low, high)
+                if Dq.null mode.background then do
+                  let mode' = pushBgTileRow tileRow mode
+                  return ppu{mode=mode'{fetcherStep=initFIFOPixelFetcher}}
+                else
+                  return ppu{mode=mode{fetcherStep=Push tileRow}}
               Push tileRow ->
                 if Dq.null mode.background then do
-                  let bg' = foldl' (\acc colorIndex -> Dq.snoc (FIFOPixel colorIndex 0 0) acc)
-                                   mode.background (tileRowColorIndexes tileRow)
-                  return ppu{mode=mode{fetcherStep=initFIFOPixelFetcher, fetcherX=mode.fetcherX + 1, background=bg'}}
+                  let mode' = pushBgTileRow tileRow mode
+                  return ppu{mode=mode'{fetcherStep=initFIFOPixelFetcher}}
                 else
                   return ppu
         executeFetcherStep ppu _ _ = return ppu
+
+        pushBgTileRow tileRow mode@(DrawingPixels {}) =
+          let bg = foldl' (\acc colorIndex -> Dq.snoc (FIFOPixel colorIndex 0 0) acc)
+                           mode.background (tileRowColorIndexes tileRow)
+          in
+            mode{background=bg, fetcherX=mode.fetcherX + 8}
+        pushBgTileRow _ mode = mode
     HorizontalBlank ->
       return ppu
 
@@ -310,19 +321,25 @@ advanceXY ppu
     in ppu{x=0, y=y, mode=mode}
   | otherwise = ppu{x=ppu.x+1}
 
-readBgTileIndex :: Word8 -> Word8 -> Bus -> IO TileIndex
-readBgTileIndex ly x bus = do
+tileIndexAddr :: Address -> Word8 -> Word8 -> Address
+tileIndexAddr base y x =
+  let y16 = fromIntegral y
+      x16 = fromIntegral x
+  in base + (y16 `div` 8 * 32 + x16 `div` 8)
+
+readBgTileIndexAddr :: Word8 -> Word8 -> Bus -> IO Address
+readBgTileIndexAddr ly x bus = do
   base <- readLcdCBgTileMapArea bus
   scx <- readSCX bus
   scy <- readSCY bus
   let bgY = ly + scy
   let bgX = x + scx
-  readTileIndex base bgY bgX bus
+  return $ tileIndexAddr base bgY bgX
 
-readWindowTileIndex :: Word8 -> Word8 -> Bus -> IO TileIndex
-readWindowTileIndex windowLine x bus = do
+readWindowTileIndexAddr :: Word8 -> Word8 -> Bus -> IO Address
+readWindowTileIndexAddr windowLine x bus = do
   base <- readLcdCWindowTileMapArea bus
-  readTileIndex base windowLine x bus
+  return $ tileIndexAddr base windowLine x
 
 syncPPUToBus :: PPU -> PPU -> IO ()
 syncPPUToBus oldPPU ppu = do

@@ -36,13 +36,12 @@ module Bus
     readWY,
     readWX,
     readWXInt,
+    readVRam,
     syncPPU,
     OAMEntry(..),
     readOAMEntry,
     TileIndex,
-    readTileIndex,
-    readBgTileRowLow,
-    readBgTileRowHigh,
+    readBgTileRowBaseAddress,
     Interrupt (..),
     Interrupts,
     readIE,
@@ -270,6 +269,11 @@ writeR16 regs r16 val =
         HL -> regs {rH = h, rL = l}
         SP -> regs {rSP = val}
 
+-- for PPU
+readVRam :: Address -> Bus -> IO Word8
+readVRam addr bus =
+  readRam (addr - 0x8000) bus.vram
+
 -- https://gbdev.io/pandocs/LCDC.html
 readLcdC :: Int -> Bus -> IO Bool
 readLcdC index bus = do
@@ -394,13 +398,6 @@ readOAMEntry i bus = do
 
 type TileIndex = Word8
 
-readTileIndex :: Address -> Word8 -> Word8 -> Bus -> IO TileIndex
-readTileIndex base y x bus = do
-  let y' = fromIntegral y :: Word16
-  let x' = fromIntegral x :: Word16
-  let addr = base + (y' `div` 8 * 32 + x' `div` 8)
-  readRam (addr - 0x8000) bus.vram
-
 readBgTileRowBaseAddress :: TileIndex -> Word8 -> Bus -> IO Address
 readBgTileRowBaseAddress index y bus = do
   base <- readLcdCBgTileDataArea bus
@@ -413,16 +410,6 @@ readBgTileRowBaseAddress index y bus = do
     -- each tile taking 16 bytes
     tileOffset i = fromIntegral i * 16
     rowOffset = fromIntegral (y `mod` 8) * 2
-
-readBgTileRowLow :: TileIndex -> Word8 -> Bus -> IO Word8
-readBgTileRowLow index y bus = do
-  addr <- readBgTileRowBaseAddress index y bus
-  readRam (addr - 0x8000) bus.vram
-
-readBgTileRowHigh :: TileIndex -> Word8 -> Bus -> IO Word8
-readBgTileRowHigh index y bus = do
-  addr <- readBgTileRowBaseAddress index y bus
-  readRam (addr + 1 - 0x8000) bus.vram
 
 -- Interruption
 data Interrupt = VBlank | LCDStat | Timer | Serial | Joypad  deriving (Show, Eq, Enum)

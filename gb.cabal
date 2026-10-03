@@ -48,6 +48,7 @@ extra-source-files:
     app/Info.plist
     app/NativeMenu.h
     resources/battery-prompts.md
+    resources/logo.png
     scripts/build-macos-app.sh
 
 data-files:

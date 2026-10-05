@@ -441,4 +441,5 @@ executeInstruction cpu op = do
       return (cpu'{registers = cpu'.registers {rPC = pc}, ime = GetIntRequest}, 8)
     JP_imm16 addr ->
       return (cpu{registers = cpu.registers {rPC = addr}}, 4)
+    JP_HL -> return (cpu {registers = cpu.registers {rPC = readR16 regs HL}}, 0)
     _ -> todo $ "execute instruction op " ++ show op

@@ -125,7 +125,13 @@ cbOpDecoder = do
     0x0b -> return $ RRC E
     0x4f -> return $ BIT 1 A
     0x7c -> return $ BIT 7 H
+    0x7e -> return $ BIT 7 AtHL
     0x11 -> return $ RL C
+    0xbe -> return $ RES SubOpRead 7 AtHL
+    0xce -> return $ SET SubOpRead 1 AtHL
+    0xe6 -> return $ SET SubOpRead 4 AtHL
+    0xf6 -> return $ SET SubOpRead 6 AtHL
+    0xfe -> return $ SET SubOpRead 7 AtHL
     _ -> todo $ "unknown cb opcode: 0x" ++ showHex b ""
 
 opCodeDecoder :: Get OpCode
@@ -144,6 +150,7 @@ opCodeDecoder = do
     0x0d -> return $ DEC_r8 SubOpRead C
     0x0e -> LD_r8_imm8 C <$> getWord8
     0x11 -> LD_r16_imm16 DE <$> getWord16le
+    0x12 -> return $ LD_AtR16mem_A DEm
     0x13 -> return $ INC_r16 DE
     0x15 -> return $ DEC_r8 SubOpRead D
     0x16 -> LD_r8_imm8 D <$> getWord8
@@ -158,6 +165,7 @@ opCodeDecoder = do
     0x24 -> return $ INC_r8 SubOpRead H
     0x26 -> LD_r8_imm8 H <$> getWord8
     0x28 -> JR_cond_imm8 Z <$> getInt8
+    0x2a -> return $ LD_A_AtR16mem HLi
     0x2e -> LD_r8_imm8 L <$> getWord8
     0x2f -> return CPL
     0x31 -> LD_r16_imm16 SP <$> getWord16le
@@ -172,8 +180,10 @@ opCodeDecoder = do
     0x66 -> return $ LD_r8_r8 H AtHL
     0x67 -> return $ LD_r8_r8 H A
     0x73 -> return $ LD_r8_r8 AtHL E
+    0x76 -> return HALT
     0x77 -> return $ LD_r8_r8 AtHL A
     0x78 -> return $ LD_r8_r8 A B
+    0x7a -> return $ LD_r8_r8 A D
     0x7b -> return $ LD_r8_r8 A E
     0x7c -> return $ LD_r8_r8 A H
     0x7d -> return $ LD_r8_r8 A L
@@ -183,9 +193,12 @@ opCodeDecoder = do
     0x89 -> return $ ALU_A_R8 ADC C
     0x90 -> return $ ALU_A_R8 SUB B
     0xaf -> return $ ALU_A_R8 XOR A
+    0xb1 -> return $ ALU_A_R8 OR C
     0xbe -> return $ ALU_A_R8 CP AtHL
     0xc1 -> return $ POP SubOpPopLow BCstk
+    0xc3 -> JP_imm16 <$> getWord16le
     0xc5 -> return $ PUSH SubOpPushWait BCstk
+    0xc8 -> return $ RET_cond Z
     0xc9 -> return $ RET SubOpPopLow
     0xcb -> PREFIX_CB <$> cbOpDecoder
     0xce -> ALU_A_imm8 ADC <$> getWord8

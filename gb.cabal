@@ -50,6 +50,10 @@ extra-source-files:
     resources/battery-prompts.md
     resources/logo.png
     scripts/build-macos-app.sh
+    test/fixtures/dmg-acid2/README.md
+    test/fixtures/dmg-acid2/LICENSE
+    test/fixtures/dmg-acid2/dmg-acid2.gb
+    test/fixtures/dmg-acid2/reference-dmg.png
 
 data-files:
     resources/device.png
@@ -99,7 +103,7 @@ test-suite gb-test
 
 
     -- Modules included in this executable, other than Main.
-    other-modules: InstructionSpec, CPUSpec
+    other-modules: InstructionSpec, CPUSpec, PPUSpec
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:
@@ -114,7 +118,8 @@ test-suite gb-test
     main-is:          Spec.hs
 
     -- Test dependencies.
-    build-depends:    base ^>=4.21.0.0, hspec, binary, bytestring, gb:gb-lib
+    build-depends:    base ^>=4.21.0.0, hspec, binary, bytestring, vector,
+                      JuicyPixels, directory, gb:gb-lib
 
 
     build-tool-depends:

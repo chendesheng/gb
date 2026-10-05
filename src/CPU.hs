@@ -21,7 +21,7 @@ import Bus
     Interrupts,
     interruptAddress,
   )
-import Data.Bits ((.<<.), xor, (.>>.), (.&.), (.|.))
+import Data.Bits ((.<<.), xor, (.>>.), (.&.), (.|.), complement)
 import qualified Data.ByteString.Lazy as BL
 import Data.Function ((&))
 import Data.Int (Int8)
@@ -31,7 +31,7 @@ import Dbg
 import Instruction
 import Registers
 
-data CPU = CPU {registers :: Registers, bus :: Bus, ime :: InterruptStep, currentInstruction :: Maybe OpCode }
+data CPU = CPU {registers :: Registers, bus :: Bus, ime :: InterruptStep, currentInstruction :: Maybe OpCode}
 
 data InterruptStep
   = Disabled
@@ -43,7 +43,7 @@ data InterruptServiceStep = IntSrvWriteSPHigh | IntSrvWriteSPLow | IntSrvJmp Int
 initCPU :: BL.ByteString -> BL.ByteString -> IO CPU
 initCPU boot cartridge = do
   bus <- initBus boot cartridge
-  return $ CPU {registers = initialRegisters, bus = bus, ime = Disabled, currentInstruction = Nothing}
+  return $ CPU {registers=initialRegisters, bus=bus, ime=Disabled, currentInstruction=Nothing}
 
 advanceAddr :: Address -> Int8 -> Word16
 advanceAddr pc imm8 =
@@ -77,6 +77,12 @@ execute cpu = do
                         }
                   , ins.len * 4
                   )
+      Just HALT -> do
+        ie <- readIE cpu.bus
+        if_ <- readIF cpu.bus
+        if null (ie `intersect` if_)
+          then return (cpu, 4)
+          else execute cpu{currentInstruction = Nothing}
       Just op -> do
         (cpu', elapsed) <- executeInstruction cpu{currentInstruction=Nothing} op
         return (cpu', elapsed)
@@ -88,10 +94,8 @@ executeInterruption cpu = do
     GetIntRequest -> do
       ie <- readIE cpu.bus
       if_ <- readIF cpu.bus
-      return $ if null $ ie `intersect` if_ then
-                 (cpu, 0)
-               else
-                (cpu{ime=Enabled IntSrvWriteSPHigh}, 8)
+      return $ if null $ ie `intersect` if_ then (cpu, 0)
+               else (cpu{ime=Enabled IntSrvWriteSPHigh, currentInstruction=Nothing}, 8)
     Enabled IntSrvWriteSPHigh -> do
       let addr = cpu.registers.rPC
       cpu' <- push8High addr cpu
@@ -157,7 +161,7 @@ executeInstruction cpu op = do
   let regs = cpu.registers
   case op of
     NOP -> return (cpu, 0)
-    HALT -> error "HALT"
+    HALT -> return (cpu{currentInstruction=Just HALT}, 0)
     ALU_A_R8 ADD src -> do
       dstVal <- readR8 regs bus A
       srcVal <- readR8 regs bus src
@@ -194,6 +198,22 @@ executeInstruction cpu op = do
       srcVal <- readR8 regs bus src
       dstVal <- readR8 regs bus A
       let a = srcVal `xor` dstVal
+      regs1 <- writeR8 regs bus A a
+      return
+        ( cpu
+            { registers =
+                regs1
+                  & setZflag (a == 0)
+                  & setNflag False
+                  & setCflag False
+                  & setHflag False
+            },
+          memoryCycles src
+        )
+    ALU_A_R8 OR src -> do
+      srcVal <- readR8 regs bus src
+      dstVal <- readR8 regs bus A
+      let a = srcVal .|. dstVal
       regs1 <- writeR8 regs bus A a
       return
         ( cpu
@@ -256,7 +276,7 @@ executeInstruction cpu op = do
           then
             (cpu {registers = advancePC offset regs}, 4)
           else (cpu, 0)
-    PREFIX_CB (BIT b3 r8) -> do
+    PREFIX_CB (BIT  b3 r8) -> do
       val <- readR8 regs bus r8
       return
         ( cpu
@@ -285,6 +305,20 @@ executeInstruction cpu op = do
           r8
           val'
       return (cpu {registers = regs'}, 2 * memoryCycles r8)
+    PREFIX_CB (RES SubOpRead b3 r8) -> do
+      val <- readR8 regs bus r8
+      return (cpu{currentInstruction=Just (PREFIX_CB (RES (SubOpWrite val) b3 r8))}, memoryCycles r8)
+    PREFIX_CB (RES (SubOpWrite val) b3 r8) -> do
+      let val' = val .&. complement (1 .<<. fromIntegral b3)
+      regs' <- writeR8 regs bus r8 val'
+      return (cpu {registers = regs'}, memoryCycles r8)
+    PREFIX_CB (SET SubOpRead b3 r8) -> do
+      val <- readR8 regs bus r8
+      return (cpu{currentInstruction=Just (PREFIX_CB (SET (SubOpWrite val) b3 r8))}, memoryCycles r8)
+    PREFIX_CB (SET (SubOpWrite val) b3 r8) -> do
+      let val' = val .|. (1 .<<. fromIntegral b3)
+      regs' <- writeR8 regs bus r8 val'
+      return (cpu {registers = regs'}, memoryCycles r8)
     LD_r8_imm8 r8 val -> do
       regs1 <- writeR8 regs bus r8 val
       return (cpu {registers = regs1}, memoryCycles r8)
@@ -327,6 +361,10 @@ executeInstruction cpu op = do
             },
           memoryCycles r8
         )
+    DEC_r16 BC -> do
+      let val = readR16 regs BC
+          regs' = writeR16 regs BC $ val - 1
+      return (cpu {registers = regs'}, 4)
     LD_A_AtR16mem src -> do
       let addr = readR16Mem regs src
       val <- readByte addr bus
@@ -347,6 +385,10 @@ executeInstruction cpu op = do
       (cpu', high) <- pop8 cpu
       let pc = toWord16 low high
       return (cpu{registers = cpu'.registers {rPC = pc}}, 8)
+    RET_cond Z -> do
+      if condSatisfied Z regs
+      then return (cpu{currentInstruction=Just (RET SubOpPopLow)}, 4)
+      else return (cpu, 4)
     PUSH SubOpPushWait stk -> do
       return (cpu{currentInstruction=Just (PUSH SubOpPushHigh stk)}, 4)
     PUSH SubOpPushHigh stk -> do
@@ -397,4 +439,6 @@ executeInstruction cpu op = do
       (cpu', high) <- pop8 cpu
       let pc = toWord16 low high
       return (cpu'{registers = cpu'.registers {rPC = pc}, ime = GetIntRequest}, 8)
+    JP_imm16 addr ->
+      return (cpu{registers = cpu.registers {rPC = addr}}, 4)
     _ -> todo $ "execute instruction op " ++ show op

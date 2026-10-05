@@ -135,8 +135,8 @@ handleAction assets state action = case action of
     Just rom -> start rom
   Just (Menu.OpenCartridge path) -> do
     result <- try $ do
-      unless (map toLower (takeExtension path) == ".bin") $
-        ioError (userError "Please choose a .bin cartridge file.")
+      unless (map toLower (takeExtension path) `elem` [".bin", ".gb"]) $
+        ioError (userError "Please choose a .bin or .gb cartridge file.")
       rom <- BL.readFile path
       unless (BL.length rom >= 0x8000) $
         ioError (userError "The cartridge must contain at least 32 KiB.")

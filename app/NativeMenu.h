@@ -24,7 +24,10 @@ static BOOL gbPickerOpen;
     panel.prompt = @"Open";
     panel.canChooseDirectories = NO;
     panel.allowsMultipleSelection = NO;
-    panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"bin"]];
+    panel.allowedContentTypes = @[
+        [UTType typeWithFilenameExtension:@"bin"],
+        [UTType typeWithFilenameExtension:@"gb"]
+    ];
     panel.allowsOtherFileTypes = NO;
     [panel beginWithCompletionHandler:^(NSModalResponse result) {
         gbPickerOpen = NO;

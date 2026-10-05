@@ -1,6 +1,6 @@
 module Color
   (
-    ColorIndex,
+    ColorIndex(ID0),
     Color(..),
     ColorPalette,
     getColor,
@@ -12,7 +12,7 @@ where
 import Data.Bits ((.&.), (.|.), (.>>.), testBit)
 import Data.Word
 
-data ColorIndex = ID0 | ID1 | ID2 | ID3 deriving (Enum, Show)
+data ColorIndex = ID0 | ID1 | ID2 | ID3 deriving (Enum, Show, Eq)
 data Color = Blank | LightGray | DarkGray | Black deriving (Enum, Show, Eq)
 
 type ColorPalette = Word8

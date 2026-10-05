@@ -1,18 +1,21 @@
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 {-# LANGUAGE BangPatterns #-}
+{-# OPTIONS_GHC -Wno-incomplete-record-updates #-}
 module PPU (execute, FIFOPixel(..), PPU(..), Display(..), initPPU) where
 
-import Prelude hiding (replicate)
 import Control.Monad (when)
 import Bus
 import Color
-import Data.Vector (Vector, replicate, toList, snoc, modify, (//), (!))
+import Data.Vector (Vector, (//), (!))
+import qualified Data.Vector as Vector
 import Data.Vector.Algorithms.Intro (sort)
 import Data.Word
 import qualified Deque.Lazy as Dq
 import Deque.Lazy (Deque)
 import Data.List.Split (chunksOf)
-
+import Data.Bits (testBit, (.&.))
+import Data.Foldable (toList)
+import GHC.Exts (fromList)
 
 -- One dot = one PPU clock. One scanline = 456 dots. One frame = 154 lines = 70224 dots.
 
@@ -20,9 +23,9 @@ import Data.List.Split (chunksOf)
 newtype Display = Display (Vector (Vector Color))
 
 initDisplay :: Display
-initDisplay = Display (replicate 144 (replicate 160 Blank))
+initDisplay = Display (Vector.replicate 144 (Vector.replicate 160 Blank))
 
-renderPixel :: Word8 -> Word8 -> Color -> Display -> Display
+renderPixel :: Word8 -> Int -> Color -> Display -> Display
 renderPixel y x !color (Display rows) =
   let y' = fromIntegral y
       row = rows ! y'
@@ -33,12 +36,14 @@ renderPixel y x !color (Display rows) =
 
 data FIFOPixel = FIFOPixel
   { color :: ColorIndex -- 0 - 3
-  , palette :: Int -- 0 - 7
+  , palette :: Bool -- False = OBP0, True = OBP1
   -- , spritePriority :: Int -- not used for DMG
-  , backgroundPriority :: Int
+  , behindBg :: Bool
   }
 
--- data PixelFIFO = PixelFIFO {oam :: [FIFOPixel], background :: [FIFOPixel]}
+zeroPixel :: FIFOPixel
+zeroPixel = FIFOPixel ID0 False False
+-- data PixelFIFO = PixelFIFO {oamQueue :: [FIFOPixel], backgroundQueue :: [FIFOPixel]}
 
 instance Show Display where
   show (Display pixels) =
@@ -70,8 +75,7 @@ data PPU = PPU
   , y :: Word8
   , mode :: PPUMode
   , lcdOn :: Bool
-  , display :: Display
-  , selectedOAMObjects :: !(Vector SelectedOAMObject) -- up to 10, reversed
+  , display :: !Display
   , windowLine :: Word8
   , windowYTriggered :: Bool -- the "Y condition"
   , bus :: Bus
@@ -79,7 +83,7 @@ data PPU = PPU
 
 data SelectedOAMObject = SelectedOAMObject
   { oamIndex :: Word8
-  , entry :: OAMEntry
+  , position :: OAMObjectPosition
   }
 
 instance Eq SelectedOAMObject where
@@ -87,108 +91,192 @@ instance Eq SelectedOAMObject where
 
 instance Ord SelectedOAMObject where
   compare a b =
-    case compare a.entry.xPos b.entry.xPos of
+    case compare a.position.xPos b.position.xPos of
       EQ -> compare a.oamIndex b.oamIndex
       others -> others
 
 initPPU :: Bus -> PPU
-initPPU = PPU 0 0 HorizontalBlank False initDisplay mempty 0 False
+initPPU = PPU 0 0 HorizontalBlank False initDisplay 0 False
 
 -- newtype Tile = Tile (Vector Word8) -- length 16
 
 data PPUMode
   = HorizontalBlank
   | VerticalBlank
-  | OAMScan (Maybe SelectedOAMObject)
+  | OAMScan !(Vector SelectedOAMObject) (Maybe SelectedOAMObject)
   | DrawingPixels
-      { fetcherStep :: FIFOPixelFetcherStep
-      , fetcherX :: Word8
+      { fetcher :: Fetcher
+      , backgroundFetcherX :: Word8
       , screenX :: Int
-      , oam :: Deque FIFOPixel
-      , background :: Deque FIFOPixel
+      , oamQueue :: Deque FIFOPixel
+      , backgroundQueue :: Deque FIFOPixel
       , windowXTriggered :: Bool
       , windowLine :: Word8
-      , fetcherSource :: FIFOFetcherSource
+      , backgroundFetcherSource :: BackgroundFetcherSource
+      , selectedOAMObjects :: !(Vector SelectedOAMObject) -- up to 10, reversed
       }
+data Fetcher
+  = FetchBackground Bool BackgroundFetcher
+  | FetchObject BackgroundFetcher ObjectFetcher Int
 
-initFIFOPixelFetcher :: FIFOPixelFetcherStep
-initFIFOPixelFetcher = GetTileIndexAddress
+initFetcher :: Fetcher
+initFetcher = FetchBackground False GetTileIndexAddress
 
 instance Eq PPUMode where
   HorizontalBlank == HorizontalBlank = True
   VerticalBlank == VerticalBlank = True
-  OAMScan a == OAMScan b = a == b
+  OAMScan _ a == OAMScan _ b = a == b
   DrawingPixels {} == DrawingPixels {} = True
   _ == _ = False
 
-data FIFOFetcherSource = Background | Window deriving (Eq, Show)
+data BackgroundFetcherSource = Background | Window deriving (Eq, Show)
 
-data FIFOPixelFetcherStep
+data BackgroundFetcher
   = GetTileIndexAddress
   | GetTileIndex Address
-  | GetTileDataLowAddress FIFOFetcherSource TileIndex
-  | GetTileDataLow Address FIFOFetcherSource TileIndex
-  | GetTileDataHighAddress FIFOFetcherSource TileIndex Word8
+  | GetTileDataLowAddress BackgroundFetcherSource TileIndex
+  | GetTileDataLow Address BackgroundFetcherSource TileIndex
+  | GetTileDataHighAddress BackgroundFetcherSource TileIndex Word8
   | GetTileDataHigh Address Word8
   | Push TileRow
 
-initOAMScan :: PPUMode
-initOAMScan = OAMScan Nothing
+data ObjectFetcher
+  = GetObjectAttrAddress SelectedOAMObject
+  | GetObjectAttr SelectedOAMObject Address
+  | GetObjectDataLowAddress SelectedOAMObject OAMObjectAttributes
+  | GetObjectDataLow SelectedOAMObject OAMObjectAttributes Address
+  | GetObjectDataHighAddress SelectedOAMObject OAMObjectAttributes Word8
+  | GetObjectDataHigh OAMObjectAttributes Address Word8
 
-initDrawingPixels :: Int -> PPUMode
-initDrawingPixels screenX = DrawingPixels initFIFOPixelFetcher 0 screenX mempty mempty False 0 Background
+isYFlip :: OAMObjectAttributes -> Bool
+isYFlip = (`testBit` 6) . attributes
+
+isXFlip :: OAMObjectAttributes -> Bool
+isXFlip = (`testBit` 5) . attributes
+
+isBehindBg :: OAMObjectAttributes -> Bool
+isBehindBg = (`testBit` 7) . attributes
+
+dmgPalette :: OAMObjectAttributes -> Bool
+dmgPalette = (`testBit` 4) . attributes
+
+readDMGPalette :: OAMObjectAttributes -> Bus -> IO ColorPalette
+readDMGPalette attr bus = do
+  if dmgPalette attr then
+    readOBP1Palette bus
+  else
+    readOBP0Palette bus
+
+initOAMScan :: PPUMode
+initOAMScan = OAMScan mempty Nothing
+
+initDrawingPixels :: Int -> Vector SelectedOAMObject -> PPUMode
+initDrawingPixels screenX = DrawingPixels initFetcher 0 screenX mempty mempty False 0 Background
 
 toIntMode :: PPUMode -> Word8
 toIntMode HorizontalBlank = 0
 toIntMode VerticalBlank = 1
-toIntMode (OAMScan _) = 2
+toIntMode (OAMScan _ _) = 2
 toIntMode (DrawingPixels {}) = 3
 
 step :: PPU -> IO PPU
 step ppu = do
   let bus = ppu.bus
   case ppu.mode of
-    OAMScan Nothing -> do
+    OAMScan selectedOAMObjects Nothing -> do
       -- even dot
       -- read entry
       let i = fromIntegral ppu.x `div` 2
-      pos <- readOAMEntry i ppu.bus
-      let mode = OAMScan (Just $ SelectedOAMObject i pos)
-      let selected = if i == 0 then mempty else ppu.selectedOAMObjects
+      pos <- readOAMPosition i ppu.bus
+      let objs = if i == 0 then mempty else selectedOAMObjects
+      let mode = OAMScan objs (Just $ SelectedOAMObject i pos)
       ppu' <- updateYTriggered ppu
-      return $ ppu'{mode=mode, selectedOAMObjects=selected}
-    OAMScan (Just pending) -> do
+      return $ ppu'{mode=mode}
+    OAMScan selectedOAMObjects (Just pending) -> do
       -- `LY` falls within `[Y - 16, Y - 16 + height)`
       height <- readLcdCObjSize bus
       let ly = fromIntegral ppu.y :: Int
-      let y = pending.entry.yPos
-      let selected = if y - 16 <= ly && ly < y - 16 + height && length ppu.selectedOAMObjects < 10 then
-                        snoc ppu.selectedOAMObjects pending
-                     else
-                        modify sort ppu.selectedOAMObjects
-
-      ppu' <- if ppu.x == 79 then do
-                  mode <- initDrawingPixels <$> initScreenX bus
-                  wx <- readWXInt bus
-                  bgEnable <- isLcdCBgEnable bus
-                  windowEnable <- isLcdCWindowEnable bus
-                  if wx == 0 && bgEnable && windowEnable && ppu.windowYTriggered then
-                    activeWindow wx ppu{mode=mode}
-                  else return $ ppu{mode=mode}
-              else return $ ppu{mode=OAMScan Nothing}
-      return $ ppu'{selectedOAMObjects=selected}
+      let y = pending.position.yPos
+      let objs = Vector.modify sort $
+                    if y - 16 <= ly && ly < y - 16 + height && length selectedOAMObjects < 10 then
+                        Vector.snoc selectedOAMObjects pending
+                    else
+                        selectedOAMObjects
+      if ppu.x == 79 then do
+          screenX <- initScreenX bus
+          let mode = initDrawingPixels screenX objs
+          wx <- readWXInt bus
+          bgEnable <- isLcdCBgEnable bus
+          windowEnable <- isLcdCWindowEnable bus
+          if wx == 0 && bgEnable && windowEnable && ppu.windowYTriggered then
+            activeWindow wx ppu{mode=mode}
+          else return $ ppu{mode=mode}
+      else return $ ppu{mode=OAMScan objs Nothing}
     DrawingPixels {} -> do
       bgEnable <- isLcdCBgEnable bus
-      if bgEnable then do
-        windowEnable <- isLcdCWindowEnable bus
-        ppu1 <- if windowEnable then tryActiveWindow ppu ppu.mode else return ppu
-        let windowActive = windowEnable && ppu1.windowYTriggered && ppu1.mode.windowXTriggered
-        ppu2 <- render ppu1 ppu1.mode
-        executeFetcherStep ppu2 ppu2.mode windowActive
-      else
-        -- TODO
-        return ppu
+      windowEnable <- isLcdCWindowEnable bus
+      objEnable <- isLcdCObjEnable bus
+      ppu1 <- if bgEnable && windowEnable then tryActiveWindow ppu ppu.mode else return ppu
+      let windowActive = bgEnable && windowEnable && ppu1.windowYTriggered &&
+                            case ppu1.mode of
+                              { DrawingPixels { windowXTriggered = w } -> w; _ -> False }
+      let ppu2 = dispatchFetcher ppu1 ppu1.mode objEnable
+      case ppu2.mode of
+        DrawingPixels {fetcher=FetchBackground disableRender fetcher} -> do
+          ppu3 <- if disableRender then return ppu2 else render ppu2 ppu2.mode objEnable bgEnable
+          if ppu3.mode.screenX == 160 then
+            return ppu3{mode=HorizontalBlank}
+          else
+            executeBackgroundFetcher ppu3 ppu3.mode fetcher windowActive
+        DrawingPixels {fetcher=FetchObject bgFetcher fetcher@(GetObjectAttrAddress _) clipCount} -> do
+          executeBothFetcher ppu2 bgFetcher fetcher windowActive clipCount
+        DrawingPixels {fetcher=FetchObject bgFetcher fetcher@(GetObjectAttr _ _) clipCount} -> do
+          executeBothFetcher ppu2 bgFetcher fetcher windowActive clipCount
+        DrawingPixels {fetcher=FetchObject bgFetcher fetcher clipCount} -> do
+          executeObjectFetcher ppu2 ppu2.mode bgFetcher fetcher clipCount
+        _ ->
+          return ppu2
       where
+        executeBothFetcher :: PPU -> BackgroundFetcher -> ObjectFetcher -> Bool -> Int -> IO PPU
+        executeBothFetcher ppu bgFetcher objFetcher windowActive clipCount = do
+          ppu' <- executeBackgroundFetcher ppu ppu.mode bgFetcher windowActive
+          let bgFetcher' = case ppu'.mode of
+                            DrawingPixels {fetcher=FetchBackground _ f} -> f
+                            DrawingPixels {fetcher=FetchObject f _ _} -> f
+                            _ -> bgFetcher
+          executeObjectFetcher ppu' ppu'.mode bgFetcher' objFetcher clipCount
+
+        dispatchFetcher ppu mode@(DrawingPixels {}) True =
+          let objs = dropPassedObjects mode.screenX mode.selectedOAMObjects
+          in
+          case Vector.uncons objs  of
+            Just (obj, rest) | (mode.screenX <= 0 && obj.position.xPos - 8 < mode.screenX)
+                                || mode.screenX == obj.position.xPos - 8  ->
+              case mode.fetcher of
+                FetchBackground _ bgFetcher ->
+                  if backgroundReady mode.backgroundQueue bgFetcher then
+                    ppu{mode=mode{ fetcher=FetchObject
+                                             bgFetcher
+                                             (GetObjectAttrAddress obj)
+                                             (max 0 $ mode.screenX - obj.position.xPos + 8)
+                                 , selectedOAMObjects=rest
+                                 }}
+                  else
+                    ppu{mode=mode{fetcher=FetchBackground True bgFetcher}}
+                FetchObject {} -> ppu
+            _ -> ppu{mode=mode{selectedOAMObjects=objs}}
+          where
+            dropPassedObjects :: Int -> Vector SelectedOAMObject -> Vector SelectedOAMObject
+            dropPassedObjects screenX = Vector.dropWhile (\obj -> screenX > 0 && obj.position.xPos - 8 < screenX)
+
+            backgroundReady backgroundQueue fetcher =
+              not (Dq.null backgroundQueue) &&
+                case fetcher of
+                  (GetTileDataHigh _ _) -> True
+                  (Push _) -> True
+                  _ -> False
+        dispatchFetcher ppu _ _ = ppu
+
         tryActiveWindow ppu mode@(DrawingPixels{}) = do
           if ppu.windowYTriggered && not mode.windowXTriggered then do
             wx <- readWXInt bus
@@ -198,76 +286,154 @@ step ppu = do
           else return ppu
         tryActiveWindow ppu _ = return ppu
 
-        render ppu mode@(DrawingPixels{screenX=screenX}) =
-          case Dq.uncons mode.background of
-            Just (pixel, background) -> do
-              if mode.screenX < 0 then do
-                return ppu{mode=mode{screenX=screenX + 1, background=background}}
-              else do
-                palette <- readBGPalette bus
-                let color = getColor pixel.color palette
-                let !display' = renderPixel ppu.y (fromIntegral screenX) color ppu.display
-                let screenX' = screenX + 1
-                let mode' = if screenX' == 160 then HorizontalBlank else mode{screenX=screenX', background=background}
-                return ppu{mode=mode', display=display'}
-            _ -> return ppu
-        render ppu _ = return ppu
+        render ppu mode@(DrawingPixels{screenX=screenX}) objEnable bgEnable =
+          if mode.screenX < 0 then do
+            case (Dq.uncons mode.backgroundQueue, Dq.uncons mode.oamQueue) of
+              (Just (_, backgroundQueue), Just (_, oamQueue)) ->
+                return ppu{mode=mode{screenX=screenX + 1, backgroundQueue=backgroundQueue, oamQueue=oamQueue}}
+              (Just (_, backgroundQueue), _) ->
+                return ppu{mode=mode{screenX=screenX + 1, backgroundQueue=backgroundQueue}}
+              (_, Just (_, oamQueue)) ->
+                return ppu{mode=mode{screenX=screenX + 1, oamQueue=oamQueue}}
+              _ -> return ppu
+          else
+            case (Dq.uncons mode.backgroundQueue, Dq.uncons mode.oamQueue) of
+              (Just (bgPixel, backgroundQueue), Just (objPixel, oamQueue)) -> do
+                let bgPixel' = if bgEnable then bgPixel else zeroPixel
+                let objPixel' = if objEnable then objPixel else zeroPixel
+                color <- pixelColor bgPixel' objPixel'
+                return ppu{ mode=mode{screenX=screenX+1, backgroundQueue=backgroundQueue, oamQueue=oamQueue}
+                          , display=renderPixel ppu.y screenX color ppu.display
+                          }
+              (Just (pixel, backgroundQueue), Nothing) -> do
+                let pixel' = if bgEnable then pixel else zeroPixel
+                color <- bgPixelColor pixel'
+                return ppu{ mode=mode{screenX=screenX+1, backgroundQueue=backgroundQueue}
+                          , display=renderPixel ppu.y screenX color ppu.display
+                          }
+              _ -> return ppu
+        render ppu _ _ _ = return ppu
 
-        executeFetcherStep ppu mode@(DrawingPixels {}) windowActive =
-            case mode.fetcherStep of
-              GetTileIndexAddress -> do
-                let source = if windowActive then Window else Background
-                mode' <- if mode.fetcherSource == Window && source == Background then do
-                              -- switch from window to background
-                              return $ mode{fetcherX=fromIntegral (mode.screenX + length mode.background)
-                                           , windowXTriggered=False
-                                           }
-                            else return mode
-                addr <- case source of
-                    Window -> readWindowTileIndexAddr mode'.windowLine mode'.fetcherX ppu.bus
-                    Background -> readBgTileIndexAddr ppu.y mode'.fetcherX bus
-                return ppu{mode=mode'{fetcherStep=GetTileIndex addr, fetcherSource=source}}
-              GetTileIndex addr -> do
-                tileIndex <- readVRam addr bus
-                return ppu{mode=mode{fetcherStep=GetTileDataLowAddress mode.fetcherSource tileIndex}}
-              GetTileDataLowAddress source tileIndex -> do
-                addr <- case source of
-                          Window -> readBgTileRowBaseAddress tileIndex mode.windowLine bus
-                          Background -> do
-                            scy <- readSCY bus
-                            readBgTileRowBaseAddress tileIndex (scy + ppu.y) bus
-                return ppu{mode=mode{fetcherStep=GetTileDataLow addr source tileIndex}}
-              GetTileDataLow addr source tileIndex -> do
-                low <- readVRam addr bus
-                return ppu{mode=mode{fetcherStep=GetTileDataHighAddress source tileIndex low}}
-              GetTileDataHighAddress source tileIndex low -> do
-                addr <- case source of
-                          Window -> readBgTileRowBaseAddress tileIndex mode.windowLine bus
-                          Background -> do
-                            scy <- readSCY bus
-                            readBgTileRowBaseAddress tileIndex (scy + ppu.y) bus
-                return ppu{mode=mode{fetcherStep=GetTileDataHigh (addr + 1) low}}
-              GetTileDataHigh addr low -> do
-                high <- readVRam addr bus
-                let tileRow = (low, high)
-                if Dq.null mode.background then do
-                  let mode' = pushBgTileRow tileRow mode
-                  return ppu{mode=mode'{fetcherStep=initFIFOPixelFetcher}}
-                else
-                  return ppu{mode=mode{fetcherStep=Push tileRow}}
-              Push tileRow ->
-                if Dq.null mode.background then do
-                  let mode' = pushBgTileRow tileRow mode
-                  return ppu{mode=mode'{fetcherStep=initFIFOPixelFetcher}}
-                else
-                  return ppu
-        executeFetcherStep ppu _ _ = return ppu
+        pixelColor :: FIFOPixel -> FIFOPixel -> IO Color
+        pixelColor bgPixel objPixel = do
+          if objPixel.color == ID0 || (objPixel.behindBg && bgPixel.color /= ID0) then
+            bgPixelColor bgPixel
+          else objectPixelColor objPixel
+
+        bgPixelColor :: FIFOPixel -> IO Color
+        bgPixelColor pixel = do
+          palette <- readBGPalette bus
+          return $ getColor pixel.color palette
+
+        objectPixelColor :: FIFOPixel -> IO Color
+        objectPixelColor pixel = do
+          palette <- readObjPalette pixel.palette bus
+          return $ getColor pixel.color palette
+
+        executeBackgroundFetcher :: PPU -> PPUMode -> BackgroundFetcher -> Bool -> IO PPU
+        executeBackgroundFetcher ppu mode@(DrawingPixels {}) fetcher windowActive =
+          case fetcher of
+            GetTileIndexAddress -> do
+              let source = if windowActive then Window else Background
+              mode' <- if mode.backgroundFetcherSource == Window && source == Background then do
+                            -- switch from window to backgroundQueue
+                            return $ mode{backgroundFetcherX=fromIntegral (mode.screenX + length mode.backgroundQueue)
+                                         , windowXTriggered=False
+                                         }
+                       else return mode
+              addr <- case source of
+                        Window -> readWindowTileIndexAddr mode'.windowLine mode'.backgroundFetcherX ppu.bus
+                        Background -> readBgTileIndexAddr ppu.y mode'.backgroundFetcherX bus
+              return ppu{mode=mode'{fetcher=FetchBackground False (GetTileIndex addr), backgroundFetcherSource=source}}
+            GetTileIndex addr -> do
+              tileIndex <- readVRam addr bus
+              return ppu{mode=mode{fetcher=FetchBackground False (GetTileDataLowAddress mode.backgroundFetcherSource tileIndex)}}
+            GetTileDataLowAddress source tileIndex -> do
+              addr <- readBgTileRowBaseAddressForSource source tileIndex mode.windowLine ppu.y bus
+              return ppu{mode=mode{fetcher=FetchBackground False (GetTileDataLow addr source tileIndex)}}
+            GetTileDataLow addr source tileIndex -> do
+              low <- readVRam addr bus
+              return ppu{mode=mode{fetcher=FetchBackground False (GetTileDataHighAddress source tileIndex low)}}
+            GetTileDataHighAddress source tileIndex low -> do
+              addr <- readBgTileRowBaseAddressForSource source tileIndex mode.windowLine ppu.y bus
+              return ppu{mode=mode{fetcher=FetchBackground False (GetTileDataHigh (addr + 1) low)}}
+            GetTileDataHigh addr low -> do
+              high <- readVRam addr bus
+              let tileRow = (low, high)
+              if Dq.null mode.backgroundQueue then do
+                let mode' = pushBgTileRow tileRow mode
+                return ppu{mode=mode'{fetcher=initFetcher}}
+              else
+                return ppu{mode=mode{fetcher=FetchBackground False (Push tileRow)}}
+            Push tileRow ->
+              if Dq.null mode.backgroundQueue then do
+                let mode' = pushBgTileRow tileRow mode
+                return ppu{mode=mode'{fetcher=initFetcher}}
+              else
+                return ppu
+        executeBackgroundFetcher ppu _ _ _ = return ppu
+
+        executeObjectFetcher :: PPU -> PPUMode -> BackgroundFetcher -> ObjectFetcher -> Int -> IO PPU
+        executeObjectFetcher ppu mode@(DrawingPixels {}) bgFetcher fetcher clipCount =
+          case fetcher of
+            GetObjectAttrAddress selected -> do
+              let addr = fromIntegral selected.oamIndex * 4 + 2
+              return ppu{mode=mode{fetcher=FetchObject bgFetcher (GetObjectAttr selected addr) clipCount}}
+            GetObjectAttr selected addr -> do
+              attr <- readOAMAttributes addr bus
+              return ppu{mode=mode{fetcher=FetchObject bgFetcher (GetObjectDataLowAddress selected attr) clipCount}}
+            GetObjectDataLowAddress selected attr -> do
+              addr <- objectDataAddr selected attr
+              return ppu{mode=mode{fetcher=FetchObject bgFetcher (GetObjectDataLow selected attr addr) clipCount}}
+            GetObjectDataLow selected attr addr -> do
+              low <- readVRam addr bus
+              return ppu{mode=mode{fetcher=FetchObject bgFetcher (GetObjectDataHighAddress selected attr low) clipCount}}
+            GetObjectDataHighAddress selected attr low -> do
+              addr <- objectDataAddr selected attr
+              return ppu{mode=mode{fetcher=FetchObject bgFetcher (GetObjectDataHigh attr (addr + 1) low) clipCount}}
+            GetObjectDataHigh attr addr low -> do
+              high <- readVRam addr bus
+              let tileRow = (low, high)
+              let mode' = pushObjectTileRow attr tileRow mode clipCount
+              return ppu{mode=mode'{fetcher=FetchBackground False bgFetcher}}
+        executeObjectFetcher ppu _ _ _ _ = return ppu
+
+        objectDataAddr :: SelectedOAMObject -> OAMObjectAttributes -> IO Address
+        objectDataAddr selected attr = do
+          height <- readLcdCObjSize bus
+          let row = yFlipRow attr height $ fromIntegral ppu.y - selected.position.yPos + 16
+          let tileIndex = if height == 16 then attr.tileIndex .&. 0xFE else attr.tileIndex
+          return $ fromIntegral $ 0x8000 + fromIntegral tileIndex * 16 + row * 2
+          where
+            yFlipRow attr height row =
+              if isYFlip attr then
+                height - 1 - row
+              else
+                 row
+
+        pushObjectTileRow attr tileRow mode@(DrawingPixels {}) clipCount =
+          let palette = dmgPalette attr
+              indexes = if isXFlip attr then reverse else id
+              behindBg = isBehindBg attr
+              newQueue = foldl' (\acc colorIndex -> Dq.snoc (FIFOPixel colorIndex palette behindBg) acc)
+                             mempty (drop clipCount $ indexes $ tileRowColorIndexes tileRow)
+              oldQueue = foldl' (\acc _ -> Dq.snoc zeroPixel acc) mode.oamQueue [1..8-length mode.oamQueue]
+
+          in
+          mode{oamQueue=fromList $ zipWith mergePixel (toList oldQueue) (toList newQueue)}
+        pushObjectTileRow _ _ mode _ = mode
+
+        mergePixel :: FIFOPixel -> FIFOPixel -> FIFOPixel
+        mergePixel old new
+          | new.color == ID0 = old
+          | old.color == ID0 = new
+          | otherwise     = old
 
         pushBgTileRow tileRow mode@(DrawingPixels {}) =
-          let bg = foldl' (\acc colorIndex -> Dq.snoc (FIFOPixel colorIndex 0 0) acc)
-                           mode.background (tileRowColorIndexes tileRow)
+          let bg = foldl' (\acc colorIndex -> Dq.snoc (FIFOPixel colorIndex False False) acc)
+                           mode.backgroundQueue (tileRowColorIndexes tileRow)
           in
-            mode{background=bg, fetcherX=mode.fetcherX + 8}
+            mode{backgroundQueue=bg, backgroundFetcherX=mode.backgroundFetcherX + 8}
         pushBgTileRow _ mode = mode
     HorizontalBlank ->
       return ppu
@@ -290,13 +456,13 @@ activeWindow wx ppu =
             | otherwise = mode.screenX
       return $ ppu{ windowLine = ppu.windowLine+1
         , mode = mode
-                  {fetcherX=0
-                  , fetcherStep=initFIFOPixelFetcher
+                  {backgroundFetcherX=0
+                  , fetcher=initFetcher
                   , windowXTriggered=True
                   , windowLine=ppu.windowLine
-                  , background=mempty
+                  , backgroundQueue=mempty
                   , screenX=windowScreenX
-                  , fetcherSource=Window
+                  , backgroundFetcherSource=Window
                   }}
     _ -> return ppu
 
@@ -317,7 +483,7 @@ advanceXY :: PPU -> PPU
 advanceXY ppu
   | ppu.x == 455 =
     let y = if ppu.y == 153 then 0 else ppu.y + 1
-        mode = if y < 144 then OAMScan Nothing else VerticalBlank
+        mode = if y < 144 then OAMScan mempty Nothing else VerticalBlank
     in ppu{x=0, y=y, mode=mode}
   | otherwise = ppu{x=ppu.x+1}
 
@@ -340,6 +506,14 @@ readWindowTileIndexAddr :: Word8 -> Word8 -> Bus -> IO Address
 readWindowTileIndexAddr windowLine x bus = do
   base <- readLcdCWindowTileMapArea bus
   return $ tileIndexAddr base windowLine x
+
+readBgTileRowBaseAddressForSource :: BackgroundFetcherSource -> TileIndex -> Word8 -> Word8 -> Bus -> IO Address
+readBgTileRowBaseAddressForSource source tileIndex windowLine y bus =
+  case source of
+    Window -> readBgTileRowBaseAddress tileIndex windowLine bus
+    Background -> do
+      scy <- readSCY bus
+      readBgTileRowBaseAddress tileIndex (scy + y) bus
 
 syncPPUToBus :: PPU -> PPU -> IO ()
 syncPPUToBus oldPPU ppu = do

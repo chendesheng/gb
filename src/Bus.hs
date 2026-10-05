@@ -19,7 +19,7 @@ module Bus
     readLcdCBgTileDataArea,
     readLcdCBgTileMapArea,
     readLcdCObjSize,
-    readLcdCObjEnable,
+    isLcdCObjEnable,
     isLcdCBgEnable,
     readLcdC,
     readLcdYC,
@@ -38,8 +38,10 @@ module Bus
     readWXInt,
     readVRam,
     syncPPU,
-    OAMEntry(..),
-    readOAMEntry,
+    OAMObjectPosition(..),
+    OAMObjectAttributes(..),
+    readOAMPosition,
+    readOAMAttributes,
     TileIndex,
     readBgTileRowBaseAddress,
     Interrupt (..),
@@ -49,6 +51,7 @@ module Bus
     readIF,
     writeIF,
     interruptAddress,
+    readObjPalette,
   )
 where
 
@@ -306,8 +309,8 @@ readLcdCObjSize bus = do
   is8x16 <- readLcdC 2 bus
   return $ if is8x16 then 16 else 8
 
-readLcdCObjEnable :: Bus -> IO Bool
-readLcdCObjEnable = readLcdC 1
+isLcdCObjEnable :: Bus -> IO Bool
+isLcdCObjEnable = readLcdC 1
 
 isLcdCBgEnable :: Bus -> IO Bool
 isLcdCBgEnable = readLcdC 0
@@ -356,6 +359,10 @@ readOBP0Palette = readByte 0xFF48
 readOBP1Palette :: Bus -> IO ColorPalette
 readOBP1Palette = readByte 0xFF49
 
+readObjPalette :: Bool -> Bus -> IO ColorPalette
+readObjPalette False = readOBP0Palette
+readObjPalette True = readOBP1Palette
+
 readWY :: Bus -> IO Word8
 readWY = readByte 0xFF4A
 
@@ -380,21 +387,29 @@ syncPPU ly mode bus = do
 -- https://gbdev.io/pandocs/OAM_DMA_Transfer.html
 
 -- OAM read for PPU
-data OAMEntry = OAMEntry
+data OAMObjectPosition = OAMObjectPosition
   { yPos :: Int
   , xPos :: Int
-  , tileIndex :: Word8
+  }
+
+data OAMObjectAttributes = OAMObjectAttributes
+  { tileIndex :: TileIndex
   , attributes :: Word8
   }
 
-readOAMEntry :: Word8 -> Bus -> IO OAMEntry
-readOAMEntry i bus = do
+readOAMPosition :: Word8 -> Bus -> IO OAMObjectPosition
+readOAMPosition i bus = do
   let addr = fromIntegral i * 4
   y <- readRam addr bus.oam
   x <- readRam (addr + 1) bus.oam
-  tileIndex <- readRam (addr + 2) bus.oam
-  attributes <- readRam (addr + 3) bus.oam
-  return $ OAMEntry (fromIntegral y) (fromIntegral x) tileIndex attributes
+  return $ OAMObjectPosition (fromIntegral y) (fromIntegral x)
+
+-- OAM has 16 bits bus, it can read 2 bytes at a time
+readOAMAttributes :: Address -> Bus -> IO OAMObjectAttributes
+readOAMAttributes addr bus = do
+  tileIndex <- readRam addr bus.oam
+  attributes <- readRam (addr + 1) bus.oam
+  return $ OAMObjectAttributes tileIndex attributes
 
 type TileIndex = Word8
 

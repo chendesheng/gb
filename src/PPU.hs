@@ -517,6 +517,7 @@ readBgTileRowBaseAddressForSource source tileIndex windowLine y bus =
 
 syncPPUToBus :: PPU -> PPU -> IO ()
 syncPPUToBus oldPPU ppu = do
+  -- Synchronizing LY/mode also updates the shared STAT interrupt line.
   syncPPU ppu.y (toIntMode ppu.mode) ppu.bus
   -- use if instead
   when (oldPPU.mode /= ppu.mode) $

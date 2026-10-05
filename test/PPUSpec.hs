@@ -2,7 +2,7 @@
 
 module PPUSpec (spec) where
 
-import Bus (Bus (..), readByte, writeByte)
+import Bus (Bus (..), readByte, writeByte, syncPPU)
 import CPU (CPU (..))
 import qualified CPU
 import Codec.Picture
@@ -24,7 +24,77 @@ import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
-spec = describe "PPU" $
+spec = describe "PPU" $ do
+  describe "STAT interrupts" $ do
+    it "requests each enabled mode interrupt only on a rising edge" $
+      mapM_ (\(mode, enabled) -> do
+        bus <- statTestBus
+        syncPPU 5 3 bus
+        _ <- writeByte 0xFF41 enabled bus
+        syncPPU 5 mode bus
+        readByte 0xFF0F bus `shouldReturn` 0x02
+        _ <- writeByte 0xFF0F 0 bus
+        syncPPU 5 mode bus
+        readByte 0xFF0F bus `shouldReturn` 0
+        syncPPU 5 3 bus
+        syncPPU 5 mode bus
+        readByte 0xFF0F bus `shouldReturn` 0x02
+        ) [(0, 0x08), (1, 0x10), (2, 0x20)]
+    it "requests LYC coincidence at the beginning of the matching scanline" $ do
+      bus <- statTestBus
+      _ <- writeByte 0xFF45 1 bus
+      _ <- writeByte 0xFF41 0x40 bus
+      ppu <- PPU.execute 255 (PPU.initPPU bus) >>= PPU.execute 200
+      readByte 0xFF44 bus `shouldReturn` 0
+      readByte 0xFF0F bus `shouldReturn` 0
+      ppu' <- PPU.execute 1 ppu
+      readByte 0xFF44 bus `shouldReturn` 1
+      readByte 0xFF0F bus `shouldReturn` 0x02
+      _ <- writeByte 0xFF0F 0 bus
+      _ <- PPU.execute 4 ppu'
+      readByte 0xFF0F bus `shouldReturn` 0
+    it "blocks another source while the shared STAT line stays high" $ do
+      bus <- statTestBus
+      syncPPU 5 3 bus
+      _ <- writeByte 0xFF41 0x18 bus
+      syncPPU 5 0 bus
+      readByte 0xFF0F bus `shouldReturn` 0x02
+      _ <- writeByte 0xFF0F 0 bus
+      syncPPU 5 1 bus
+      readByte 0xFF0F bus `shouldReturn` 0
+      syncPPU 5 3 bus
+      syncPPU 5 1 bus
+      readByte 0xFF0F bus `shouldReturn` 0x02
+    it "reacts immediately to STAT and LYC writes and preserves other IF bits" $ do
+      bus <- statTestBus
+      _ <- writeByte 0xFF45 5 bus
+      syncPPU 5 3 bus
+      _ <- writeByte 0xFF0F 0x05 bus
+      _ <- writeByte 0xFF41 0x40 bus
+      readByte 0xFF0F bus `shouldReturn` 0x07
+      _ <- writeByte 0xFF0F 0 bus
+      _ <- writeByte 0xFF41 0x40 bus
+      readByte 0xFF0F bus `shouldReturn` 0
+      _ <- writeByte 0xFF45 6 bus
+      _ <- writeByte 0xFF45 5 bus
+      readByte 0xFF0F bus `shouldReturn` 0x02
+      _ <- writeByte 0xFF0F 0 bus
+      _ <- writeByte 0xFF41 0 bus
+      _ <- writeByte 0xFF41 0x40 bus
+      readByte 0xFF0F bus `shouldReturn` 0x02
+    it "keeps the STAT line low while LCD is disabled and rearms it on enable" $ do
+      bus <- statTestBus
+      _ <- writeByte 0xFF41 0x28 bus
+      readByte 0xFF0F bus `shouldReturn` 0x02
+      _ <- writeByte 0xFF0F 0 bus
+      _ <- writeByte 0xFF40 0 bus
+      _ <- writeByte 0xFF41 0x28 bus
+      _ <- writeByte 0xFF45 0 bus
+      readByte 0xFF44 bus `shouldReturn` 0
+      readByte 0xFF0F bus `shouldReturn` 0
+      _ <- writeByte 0xFF40 0x80 bus
+      readByte 0xFF0F bus `shouldReturn` 0x02
+
   it "renders the dmg-acid2 DMG reference image" $ do
     rom <- BL.readFile "test/fixtures/dmg-acid2/dmg-acid2.gb"
     decoded <- readImage "test/fixtures/dmg-acid2/reference-dmg.png"
@@ -35,6 +105,12 @@ spec = describe "PPU" $
     case result of
       Nothing -> expectationFailure "dmg-acid2 exceeded the 30-second timeout"
       Just ppu -> compareFrame reference ppu
+
+statTestBus :: IO Bus
+statTestBus = do
+  cpu <- CPU.initCPU BL.empty BL.empty
+  _ <- writeByte 0xFF40 0x80 cpu.bus
+  pure cpu.bus
 
 -- Start at the cartridge entry point in a deterministic DMG post-boot state.
 -- Boot-ROM execution is already covered by CPUSpec.

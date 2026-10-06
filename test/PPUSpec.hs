@@ -94,6 +94,13 @@ spec = describe "PPU" $ do
       readByte 0xFF0F bus `shouldReturn` 0
       _ <- writeByte 0xFF40 0x80 bus
       readByte 0xFF0F bus `shouldReturn` 0x02
+      -- Enabling LCD enters mode 2 directly; its temporary old mode 0
+      -- must not generate a HBlank interrupt during the combined update.
+      _ <- writeByte 0xFF40 0 bus
+      _ <- writeByte 0xFF0F 0 bus
+      _ <- writeByte 0xFF41 0x08 bus
+      _ <- writeByte 0xFF40 0x80 bus
+      readByte 0xFF0F bus `shouldReturn` 0
 
   it "renders the dmg-acid2 DMG reference image" $ do
     rom <- BL.readFile "test/fixtures/dmg-acid2/dmg-acid2.gb"

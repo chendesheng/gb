@@ -56,7 +56,7 @@ module Bus
 where
 
 import Data.Binary.Get (runGet)
-import Data.Bits ((.|.), (.&.), Bits (shiftR, testBit), setBit, clearBit)
+import Data.Bits ((.|.), (.&.), (.>>.), testBit, setBit, clearBit)
 import qualified Data.ByteString.Lazy as BL
 import Data.Vector.Unboxed (Vector, (!))
 import qualified Data.Vector.Unboxed as V
@@ -67,7 +67,7 @@ import Instruction (Instruction, instructionDecoder)
 import Registers
 import Prelude hiding (length)
 import Color
-import Control.Monad (when)
+import Control.Monad (unless, when)
 
 type Rom = Vector Word8
 
@@ -92,8 +92,7 @@ data Bus = Bus
     oam :: Ram,
     hram :: Ram,
     io :: Ram,
-    ie :: IORef Word8,
-    statInterruptLine :: IORef Bool
+    ie :: IORef Word8
   }
 
 initBus :: BL.ByteString -> BL.ByteString -> IO Bus
@@ -104,7 +103,6 @@ initBus boot cartridge = do
   hram <- MV.replicate 0x007F 0xCD -- FF80-FFFE
   io <- MV.replicate 0x0080 0x00 -- FF00-FF7F, rough/simple
   ie  <- newIORef 0x00
-  statInterruptLine <- newIORef False
   return
     Bus
       { boot = byteStringToVector boot,
@@ -114,8 +112,7 @@ initBus boot cartridge = do
         oam,
         hram,
         io,
-        ie,
-        statInterruptLine
+        ie
       }
 
 readByte0xFF50 :: Bus -> IO Word8
@@ -180,34 +177,33 @@ writeByte addr val bus
         writeRam (addr - 0xFE00) val bus.oam
         return bus
   | 0xFF40 == addr = do
-      wasOn <- isLcdOn bus
-      writeRam 0x40 val bus.io
-      if not (val `testBit` 7) then
-        syncPPU 0 0 bus
-      else if not wasOn then
-        syncPPU 0 2 bus
-      else
-        updateSTATInterrupt bus
+      updateSTATInterrupt bus $ do
+        wasOn <- isLcdOn bus
+        writeRam 0x40 val bus.io
+        if not (val `testBit` 7) then
+          syncPPURegisters 0 0 bus
+        else
+          unless wasOn $ syncPPURegisters 0 2 bus
       return bus
   | 0xFF41 == addr = do
-      -- the lower 3 bits are readonly
-      -- FIXME: what about the highest bit?
-      b <- readRam 0x41 bus.io
-      let b' = b .&. 0x07 -- b00000111
-      let val' = val .&. 0xF8 -- b11111000
-      writeRam 0x41 (val' .|. b') bus.io
-      updateSTATInterrupt bus
+      updateSTATInterrupt bus $ do
+        -- the lower 3 bits are readonly
+        -- FIXME: what about the highest bit?
+        b <- readRam 0x41 bus.io
+        let b' = b .&. 0x07 -- b00000111
+        let val' = val .&. 0xF8 -- b11111000
+        writeRam 0x41 (val' .|. b') bus.io
       return bus
   | 0xFF44 == addr = return bus -- LY is readonly
   | 0xFF45 == addr = do -- LY compare
-      ly <- readLcdY bus
-      status <- readRam 0x41 bus.io
-      writeRam 0x45 val bus.io
-      if ly == val then do
-        writeRam 0x41 (status `setBit` 2) bus.io
-      else
-        writeRam 0x41 (status `clearBit` 2) bus.io
-      updateSTATInterrupt bus
+      updateSTATInterrupt bus $ do
+        ly <- readLcdY bus
+        status <- readRam 0x41 bus.io
+        writeRam 0x45 val bus.io
+        if ly == val then do
+          writeRam 0x41 (status `setBit` 2) bus.io
+        else
+          writeRam 0x41 (status `clearBit` 2) bus.io
       return bus
   | 0xFF50 == addr = do
       -- 0xFF50 disables boot ROM
@@ -297,7 +293,7 @@ readVRam addr bus =
 readLcdC :: Int -> Bus -> IO Bool
 readLcdC index bus = do
   b <- readByte 0xFF40 bus
-  return $ (b `shiftR` index .&. 0x01) == 1
+  return $ (b .>>. index .&. 0x01) == 1
 
 isLcdOn :: Bus -> IO Bool
 isLcdOn = readLcdC 7
@@ -343,7 +339,7 @@ readLcdYC = readByte 0xFF45
 readLcdStatus :: Int -> Bus -> IO Bool
 readLcdStatus index bus = do
   b <- readRam 0x41 bus.io
-  return $ (b `shiftR` index .&. 0x01) == 1
+  return $ (b .>>. index .&. 0x01) == 1
 
 readLYCIntSelect :: Bus -> IO Bool
 readLYCIntSelect = readLcdStatus 6
@@ -390,7 +386,11 @@ readWXInt bus = fromIntegral <$> readWX bus
 
 -- in order make PPU state readable by CPU from Bus
 syncPPU :: Word8 -> Word8 -> Bus -> IO ()
-syncPPU ly mode bus = do
+syncPPU ly mode bus = updateSTATInterrupt bus $ syncPPURegisters ly mode bus
+
+-- LCDC writes update LY/mode as part of the same STAT edge comparison.
+syncPPURegisters :: Word8 -> Word8 -> Bus -> IO ()
+syncPPURegisters ly mode bus = do
   -- TODO: there are other things need update
   _ <- writeRam 0x44 ly bus.io
   lyc <- readRam 0x45 bus.io
@@ -398,21 +398,24 @@ syncPPU ly mode bus = do
   status <- readRam 0x41 bus.io
   let status' = if ly == lyc then status `setBit` 2 else status `clearBit` 2
   writeRam 0x41 (status' .&. 0xFC .|. mode) bus.io
-  updateSTATInterrupt bus
 
--- PPU updates and CPU register writes share one edge detector.
-updateSTATInterrupt :: Bus -> IO ()
-updateSTATInterrupt bus = do
+readSTATInterruptLine :: Bus -> IO Bool
+readSTATInterruptLine bus = do
   lcdOn <- isLcdOn bus
   status <- readRam 0x41 bus.io
   let mode = status .&. 0x03
-      newLine = lcdOn &&
+  return $ lcdOn &&
         ((status `testBit` 3 && mode == 0)
           || (status `testBit` 4 && mode == 1)
           || (status `testBit` 5 && mode == 2)
           || (status `testBit` 6 && status `testBit` 2))
-  oldLine <- readIORef bus.statInterruptLine
-  writeIORef bus.statInterruptLine newLine
+
+-- Compare the signal before and after a complete register update.
+updateSTATInterrupt :: Bus -> IO () -> IO ()
+updateSTATInterrupt bus update = do
+  oldLine <- readSTATInterruptLine bus
+  update
+  newLine <- readSTATInterruptLine bus
   when (not oldLine && newLine) $ writeIF LCDStat True bus
 
 -- TODO: OAM DMA transfer

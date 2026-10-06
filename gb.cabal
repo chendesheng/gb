@@ -82,7 +82,7 @@ library gb-lib
     hs-source-dirs:   src
 
     -- Test dependencies.
-    build-depends:    base ^>=4.21.0.0, bytestring, binary, vector, vector-algorithms, split, deque
+    build-depends:    base ^>=4.21.0.0, bytestring, binary, vector, vector-algorithms, split, deque, stm
 
 executable gb-exe
     import:           warnings, shared
@@ -103,7 +103,7 @@ test-suite gb-test
 
 
     -- Modules included in this executable, other than Main.
-    other-modules: InstructionSpec, CPUSpec, PPUSpec
+    other-modules: InstructionSpec, CPUSpec, PPUSpec, EmulatorSpec
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:

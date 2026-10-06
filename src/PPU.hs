@@ -1,7 +1,7 @@
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 {-# LANGUAGE BangPatterns #-}
 {-# OPTIONS_GHC -Wno-incomplete-record-updates #-}
-module PPU (execute, FIFOPixel(..), PPU(..), Display(..), initPPU) where
+module PPU (execute, FIFOPixel(..), PPU(..), Display(..), initPPU, isVBlankMode) where
 
 import Control.Monad (when)
 import Bus
@@ -524,6 +524,10 @@ syncPPUToBus oldPPU ppu = do
     case ppu.mode of
       VerticalBlank -> writeIF VBlank True ppu.bus
       _ -> return ()
+
+isVBlankMode :: PPU -> Bool
+isVBlankMode PPU{mode=VerticalBlank} = True
+isVBlankMode _ = False
 
 execute :: Word8 -> PPU -> IO PPU
 execute 0 ppu = return ppu

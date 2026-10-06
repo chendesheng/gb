@@ -5,7 +5,6 @@ import Bus
   ( Address,
     Bus,
     fetchInstruction,
-    initBus,
     readByte,
     readByteHighMemory,
     readR16,
@@ -22,7 +21,6 @@ import Bus
     interruptAddress,
   )
 import Data.Bits ((.<<.), xor, (.>>.), (.&.), (.|.), complement)
-import qualified Data.ByteString.Lazy as BL
 import Data.Function ((&))
 import Data.Int (Int8)
 import Data.Word

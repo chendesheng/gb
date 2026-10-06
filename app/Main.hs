@@ -1,20 +1,22 @@
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE TupleSections #-}
 
 module Main (main) where
 
-import Control.Exception (SomeException, bracket, displayException, try)
+import Control.Exception (SomeException, bracket, displayException, mask_, try)
 import Control.Monad (unless, when)
 import qualified Color as GB
 import qualified Data.ByteString.Lazy as BL
 import Data.Char (toLower)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, writeIORef)
 import Data.Maybe (isJust)
 import qualified Data.Vector as V
-import Emulator (Emulator (..), advanceFrame, powerOn)
+import Emulator (Emulator, EmulatorWorker, powerOn, runInBackground, stopWorker, nextWorkerError, nextDisplay)
 import Foreign.Marshal.Array (withArray)
 import Foreign.Ptr (castPtr)
 import qualified NativeMenu as Menu
 import Paths_gb (getDataFileName)
-import PPU (Display (..), PPU (..))
+import PPU (Display (..))
 import Raylib.Core
   ( clearBackground, closeWindow, getMouseX, getMouseY, getWindowPosition,
     initWindow, isMouseButtonDown, isMouseButtonPressed, isWindowReady,
@@ -35,6 +37,7 @@ import Raylib.Util.Colors (black, blank, white)
 import System.Directory (doesFileExist)
 import System.Environment (getExecutablePath)
 import System.FilePath ((</>), takeDirectory, takeExtension)
+import Data.Foldable (for_)
 
 data UIState = UIState
   { cartridge :: Maybe BL.ByteString
@@ -49,6 +52,7 @@ data Assets = Assets
   , batteryOn :: Texture
   , lcd :: Texture
   , boot :: BL.ByteString
+  , worker :: IORef (Maybe EmulatorWorker)
   }
 
 main :: IO ()
@@ -84,8 +88,9 @@ main = do
     setWindowSize width height
     setTargetFPS 60
     Menu.installMenu
-    loop (Assets device batteryOff batteryOn lcd boot) width height
-      (UIState Nothing Nothing False Nothing)
+    bracket (newIORef Nothing) stopCurrentWorker $ \worker ->
+      loop (Assets device batteryOff batteryOn lcd boot worker) width height
+        (UIState Nothing Nothing False Nothing)
 
 -- The app bundle carries its own resources; Cabal supplies paths for cabal run.
 resourcePath :: FilePath -> IO FilePath
@@ -110,10 +115,12 @@ loop assets width height state = do
       then handleAction assets state1 (Just $ if isJust state1.emulator then Menu.PowerOff else Menu.PowerOn)
       else pure state1
     anchor <- if switchClicked then pure Nothing else dragWindow state2.dragAnchor
-    state3 <- advanceEmulator state2
+    state3 <- checkWorkerError assets state2
     Menu.setPowerState (isJust state3.cartridge) (isJust state3.emulator)
     case state3.emulator of
-      Just machine -> updateLCD assets.lcd machine.ppu.display
+      Just machine -> do
+        maybeDisplay <- nextDisplay machine
+        for_ maybeDisplay (updateLCD assets.lcd)
       Nothing -> pure ()
     drawing $ do
       clearBackground blank
@@ -129,7 +136,9 @@ loop assets width height state = do
 handleAction :: Assets -> UIState -> Maybe Menu.MenuAction -> IO UIState
 handleAction assets state action = case action of
   Nothing -> pure state
-  Just Menu.PowerOff -> pure state{emulator=Nothing, paused=False}
+  Just Menu.PowerOff -> do
+    stopCurrentWorker assets.worker
+    pure state{emulator=Nothing, paused=False}
   Just Menu.PowerOn -> case state.cartridge of
     Nothing -> pure state
     Just rom -> start rom
@@ -149,17 +158,27 @@ handleAction assets state action = case action of
       result <- try (powerOn assets.boot rom)
       case result of
         Left err -> Menu.showError (displayException (err :: SomeException)) >> pure state
-        Right machine -> pure state{cartridge=Just rom, emulator=Just machine, paused=False}
+        Right machine -> do
+          mask_ $ do
+            stopCurrentWorker assets.worker
+            worker <- runInBackground machine
+            writeIORef assets.worker (Just worker)
+          pure state{cartridge=Just rom, emulator=Just machine, paused=False}
 
-advanceEmulator :: UIState -> IO UIState
-advanceEmulator state = case state.emulator of
+stopCurrentWorker :: IORef (Maybe EmulatorWorker) -> IO ()
+stopCurrentWorker workerRef = mask_ $ do
+  worker <- atomicModifyIORef' workerRef (Nothing,)
+  mapM_ stopWorker worker
+
+checkWorkerError :: Assets -> UIState -> IO UIState
+checkWorkerError assets state = case state.emulator of
   Just machine | not state.paused -> do
-    result <- try (advanceFrame machine)
-    case result of
-      Right machine' -> pure state{emulator=Just machine'}
-      Left err -> do
-        -- Keep the last screen and power light on when the unfinished core stops.
-        Menu.showError ("Emulation stopped:\n" ++ displayException (err :: SomeException))
+    failure <- nextWorkerError machine
+    case failure of
+      Nothing -> pure state
+      Just err -> do
+        stopCurrentWorker assets.worker
+        Menu.showError ("Emulation stopped:\n" ++ displayException err)
         pure state{paused=True}
   _ -> pure state
 

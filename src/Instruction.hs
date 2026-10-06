@@ -11,6 +11,7 @@ module Instruction
     ALUOp (..),
     CBOp (..),
     SubOpMem (..),
+    SubOpWrite16 (..),
     SubOpCall (..),
     SubOpPop (..),
     SubOpPush (..),
@@ -54,6 +55,9 @@ data RstTarget
 data SubOpMem = SubOpRead | SubOpWrite Word8
   deriving (Show, Eq)
 
+data SubOpWrite16 = SubOpWriteLow | SubOpWriteHigh Word8
+  deriving (Show, Eq)
+
 data SubOpCall = SubOpCallWait | SubOpCallPushHigh | SubOpCallJmp deriving (Show, Eq)
 data SubOpPop = SubOpPopLow | SubOpPopHigh Word8 deriving (Show, Eq)
 data SubOpPush = SubOpPushWait | SubOpPushHigh | SubOpPushLow deriving (Show, Eq)
@@ -90,7 +94,7 @@ data OpCode
   | LD_HL_SP_plus_imm8 Int8
   | LD_SP_HL
   | LD_Addr16_A Word16
-  | LD_imm16_SP Word16
+  | LD_imm16_SP SubOpWrite16 Word16
   | LD_r16_imm16 R16 Word16
   | LD_AtR16mem_A R16Mem
   | LD_r8_imm8 R8 Word8
@@ -168,7 +172,7 @@ opCodeDecoder = do
     0x05 -> return $ DEC_r8 SubOpRead B
     0x06 -> LD_r8_imm8 B <$> getWord8
     0x07 -> return RLCA
-    0x08 -> LD_imm16_SP <$> getWord16le
+    0x08 -> LD_imm16_SP SubOpWriteLow <$> getWord16le
     0x09 -> return $ ADD_HL_r16 BC
     0x0a -> return $ LD_A_AtR16mem BCm
     0x0b -> return $ DEC_r16 BC

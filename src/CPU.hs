@@ -27,7 +27,6 @@ import Data.Function ((&))
 import Data.Int (Int8)
 import Data.Word
 import Data.List (intersect)
-import Dbg
 import Instruction
 import Registers
 
@@ -36,7 +35,6 @@ data CPU = CPU
   , bus :: Bus
   , ime :: InterruptStep
   , currentInstruction :: Maybe OpCode
-  , pendingWrite :: Maybe (Address, Word8)
   }
 
 data InterruptStep
@@ -48,7 +46,7 @@ data InterruptServiceStep = IntSrvWriteSPHigh | IntSrvWriteSPLow | IntSrvJmp Int
 
 initCPU :: Bus -> CPU
 initCPU bus = do
-  CPU {registers=initialRegisters, bus=bus, ime=Disabled, currentInstruction=Nothing, pendingWrite=Nothing}
+  CPU {registers=initialRegisters, bus=bus, ime=Disabled, currentInstruction=Nothing}
 
 advanceAddr :: Address -> Int8 -> Word16
 advanceAddr pc imm8 =
@@ -444,15 +442,13 @@ executeInstruction cpu op = do
       a <- readR8 regs bus A
       writeByte addr a bus
       return (cpu, 1)
-    LD_imm16_SP addr -> do
-      case cpu.pendingWrite of
-        Nothing -> do
-          let sp = readR16 regs SP
-          writeByte addr (lowByte sp) bus
-          return (cpu {currentInstruction=Just op, pendingWrite=Just (addr + 1, highByte sp)}, 1)
-        Just (address, value) -> do
-          writeByte address value bus
-          return (cpu {currentInstruction=Nothing, pendingWrite=Nothing}, 1)
+    LD_imm16_SP SubOpWriteLow addr -> do
+      let sp = readR16 regs SP
+      writeByte addr (lowByte sp) bus
+      return (cpu {currentInstruction=Just (LD_imm16_SP (SubOpWriteHigh (highByte sp)) addr)}, 1)
+    LD_imm16_SP (SubOpWriteHigh value) addr -> do
+      writeByte (addr + 1) value bus
+      return (cpu {currentInstruction=Nothing}, 1)
     LDH_A_C -> do
       val <- readByteHighMemory regs.rC bus
       regs' <- writeR8 regs bus A val

@@ -385,8 +385,8 @@ executeInstruction cpu op = do
       (cpu', high) <- pop8 cpu
       let pc = toWord16 low high
       return (cpu{registers = cpu'.registers {rPC = pc}}, 8)
-    RET_cond Z -> do
-      if condSatisfied Z regs
+    RET_cond cond -> do
+      if condSatisfied cond regs
       then return (cpu{currentInstruction=Just (RET SubOpPopLow)}, 4)
       else return (cpu, 4)
     PUSH SubOpPushWait stk -> do

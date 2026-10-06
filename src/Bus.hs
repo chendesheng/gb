@@ -90,8 +90,8 @@ data Bus = Bus
     vram :: Ram,
     wram :: Ram,
     oam :: Ram,
-    hram :: Ram,
     io :: Ram,
+    hram :: Ram,
     ie :: IORef Word8
   }
 
@@ -100,8 +100,8 @@ initBus boot cartridge = do
   vram <- MV.replicate 0x2000 0xCD -- 8000-9FFF
   wram <- MV.replicate 0x2000 0xCD -- C000-DFFF
   oam <- MV.replicate 0x00A0 0xCD -- FE00-FE9F
-  hram <- MV.replicate 0x007F 0xCD -- FF80-FFFE
   io <- MV.replicate 0x0080 0x00 -- FF00-FF7F, rough/simple
+  hram <- MV.replicate 0x007F 0xCD -- FF80-FFFE
   ie  <- newIORef 0x00
   return
     Bus

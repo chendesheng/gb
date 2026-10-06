@@ -1,6 +1,6 @@
 module CPUSpec (spec) where
 
-import Bus (bootRomEnabled, readByte, writeByte)
+import Bus (bootRomEnabled, readByte, writeByte, initBus)
 import CPU (CPU (..), initCPU)
 import qualified PPU
 import qualified CPU
@@ -14,7 +14,8 @@ import Test.Hspec
 testCPU :: IO CPU
 testCPU = do
   bootRom <- BL.readFile "./test/fixtures/dmg.bin"
-  initCPU bootRom dummyCartridge
+  bus <- initBus bootRom dummyCartridge
+  return $ initCPU bus
   where
     zeros :: Int -> [Word8]
     zeros n = Prelude.replicate n 0
@@ -65,7 +66,9 @@ spec = describe "CPU" $ do
     (cpu1, _) <- executeOneCPUInstruction cpu
     cpu1.registers.rSP `shouldBe` 0xFFFE
   it "cancels interrupt dispatch when pushing PC high changes IE" $ do
-    cpu <- initCPU (BL.pack $ 0xFB : Prelude.replicate 255 0) (BL.replicate 0x8000 0)
+
+    bus <- initBus (BL.pack $ 0xFB : Prelude.replicate 255 0) (BL.replicate 0x8000 0)
+    let cpu = initCPU bus
     -- Execute EI and NOP so the interrupt enable delay has elapsed.
     (cpu1, _) <- executeOneCPUInstruction cpu
     (cpu2, _) <- executeOneCPUInstruction cpu1

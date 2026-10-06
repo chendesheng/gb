@@ -2,7 +2,7 @@
 
 module PPUSpec (spec) where
 
-import Bus (Bus (..), readByte, writeByte, syncPPU)
+import Bus (Bus (..), readByte, writeByte, syncPPU, initBus)
 import CPU (CPU (..))
 import qualified CPU
 import Codec.Picture
@@ -115,15 +115,16 @@ spec = describe "PPU" $ do
 
 statTestBus :: IO Bus
 statTestBus = do
-  cpu <- CPU.initCPU BL.empty BL.empty
-  writeByte 0xFF40 0x80 cpu.bus
-  pure cpu.bus
+  bus <- initBus BL.empty BL.empty
+  writeByte 0xFF40 0x80 bus
+  pure bus
 
 -- Start at the cartridge entry point in a deterministic DMG post-boot state.
 -- Boot-ROM execution is already covered by CPUSpec.
 initPostBootCPU :: BL.ByteString -> IO CPU.CPU
 initPostBootCPU rom = do
-  cpu <- CPU.initCPU BL.empty rom
+  bus <- initBus BL.empty rom
+  let cpu = CPU.initCPU bus
   Mutable.set cpu.bus.vram 0
   Mutable.set cpu.bus.oam 0
   mapM_ (\(address, value) -> writeByte address value cpu.bus)

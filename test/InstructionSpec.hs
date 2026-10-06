@@ -1,6 +1,6 @@
 module InstructionSpec (spec) where
 
-import Bus (readByte, readByteHighMemory, readR16, writeR8, writeByte, writeR16, writeByteHighMemory)
+import Bus (readByte, readByteHighMemory, readR16, writeR8, writeByte, writeR16, writeByteHighMemory, initBus)
 import CPU (CPU (..), executeInstruction, initCPU)
 import qualified CPU
 import Control.Monad (foldM)
@@ -229,4 +229,5 @@ cpuWriteR16 r16 val cpu = do
 testCPU :: IO CPU
 testCPU = do
   bootRom <- BL.readFile "./test/fixtures/dmg.bin"
-  initCPU bootRom (BL.pack [])
+  bus <- initBus bootRom (BL.pack [])
+  return $ initCPU bus

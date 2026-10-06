@@ -40,10 +40,9 @@ data InterruptStep
   | Enabled InterruptServiceStep  deriving (Eq, Show)
 data InterruptServiceStep = IntSrvWriteSPHigh | IntSrvWriteSPLow | IntSrvJmp Interrupts deriving (Eq, Show)
 
-initCPU :: BL.ByteString -> BL.ByteString -> IO CPU
-initCPU boot cartridge = do
-  bus <- initBus boot cartridge
-  return $ CPU {registers=initialRegisters, bus=bus, ime=Disabled, currentInstruction=Nothing}
+initCPU :: Bus -> CPU
+initCPU bus = do
+  CPU {registers=initialRegisters, bus=bus, ime=Disabled, currentInstruction=Nothing}
 
 advanceAddr :: Address -> Int8 -> Word16
 advanceAddr pc imm8 =

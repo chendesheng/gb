@@ -52,16 +52,18 @@ module Bus
     writeIF,
     interruptAddress,
     readObjPalette,
+    setJoypad,
+    JoypadKey(..),
   )
 where
 
 import Data.Binary.Get (runGet)
-import Data.Bits ((.|.), (.&.), (.>>.), testBit, setBit, clearBit)
+import Data.Bits ((.|.), (.&.), (.>>.), testBit, setBit, clearBit, complement)
 import qualified Data.ByteString.Lazy as BL
 import Data.Vector.Unboxed (Vector, (!))
 import qualified Data.Vector.Unboxed as V
 import qualified Data.Vector.Unboxed.Mutable as MV
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef, modifyIORef')
 import Data.Word
 import Instruction (Instruction, instructionDecoder)
 import Registers
@@ -92,7 +94,8 @@ data Bus = Bus
     oam :: Ram,
     io :: Ram,
     hram :: Ram,
-    ie :: IORef Word8
+    ie :: IORef Word8,
+    joypad :: IORef Word8
   }
 
 initBus :: BL.ByteString -> BL.ByteString -> IO Bus
@@ -101,8 +104,10 @@ initBus boot cartridge = do
   wram <- MV.replicate 0x2000 0xCD -- C000-DFFF
   oam <- MV.replicate 0x00A0 0xCD -- FE00-FE9F
   io <- MV.replicate 0x0080 0x00 -- FF00-FF7F, rough/simple
+  writeRam 0 0x0F io
   hram <- MV.replicate 0x007F 0xCD -- FF80-FFFE
   ie  <- newIORef 0x00
+  joypad <- newIORef 0xFF
   return
     Bus
       { boot = byteStringToVector boot,
@@ -112,7 +117,8 @@ initBus boot cartridge = do
         oam,
         hram,
         io,
-        ie
+        ie,
+        joypad
       }
 
 readByte0xFF50 :: Bus -> IO Word8
@@ -140,7 +146,20 @@ readByte addr bus
       mode <- readPPUMode bus.io
       if mode == 2 || mode == 3 then return 0xFF
       else readRam (addr - 0xFE00) bus.oam
-  | 0xFF00 <= addr && addr < 0xFF80 =
+  | 0xFF00 == addr = do
+      selection <- readRam 0 bus.io
+      directions <- if selection `testBit` 4 then
+                      return 0xF
+                    else do
+                      joypad <- readIORef bus.joypad
+                      return $ (joypad .&. 0xF0) .>>. 4
+      buttons <- if selection `testBit` 5 then
+                    return 0xF
+                  else do
+                    joypad <- readIORef bus.joypad
+                    return $ joypad .&. 0x0F
+      return $ 0xC0 .|. (0x30 .&. selection) .|. (directions .&. buttons)
+  | 0xFF00 < addr && addr < 0xFF80 =
       readRam (addr - 0xFF00) bus.io
   | 0xFF80 <= addr && addr < 0xFFFF =
       readRam (addr - 0xFF80) bus.hram
@@ -165,17 +184,14 @@ writeByte addr val bus
         return ()
       else do
         writeRam (addr - 0x8000) val bus.vram
-        return ()
   | 0xC000 <= addr && addr < 0xE000 = do
       writeRam (addr - 0xC000) val bus.wram
-      return ()
   | 0xFE00 <= addr && addr < 0xFEA0 = do
       mode <- readPPUMode bus.io
       if mode == 2 || mode == 3 then
         return ()
       else do
         writeRam (addr - 0xFE00) val bus.oam
-        return ()
   | 0xFF40 == addr = do
       updateSTATInterrupt bus $ do
         wasOn <- isLcdOn bus
@@ -184,7 +200,6 @@ writeByte addr val bus
           syncPPURegisters 0 0 bus
         else
           unless wasOn $ syncPPURegisters 0 2 bus
-      return ()
   | 0xFF41 == addr = do
       updateSTATInterrupt bus $ do
         -- the lower 3 bits are readonly
@@ -204,21 +219,21 @@ writeByte addr val bus
           writeRam 0x41 (status `setBit` 2) bus.io
         else
           writeRam 0x41 (status `clearBit` 2) bus.io
-      return ()
   | 0xFF50 == addr = do
       -- 0xFF50 disables boot ROM
       b <- readByte0xFF50 bus
       writeRam 0x50 (val .|. b) bus.io
-      return ()
-  | 0xFF00 <= addr && addr < 0xFF80 = do
+  | 0xFF00 == addr = do
+    oldJoyp <- readJOYP bus
+    writeRam 0 val bus.io
+    joyp <- readJOYP bus
+    requestJoypadInt oldJoyp joyp bus
+  | 0xFF00 < addr && addr < 0xFF80 = do
       writeRam (addr - 0xFF00) val bus.io
-      return ()
   | 0xFF80 <= addr && addr < 0xFFFF = do
       writeRam (addr - 0xFF80) val bus.hram
-      return ()
   | addr == 0xFFFF = do
       writeIORef bus.ie val
-      return ()
   | otherwise = return ()
 
 readPPUMode :: Ram -> IO Word8
@@ -462,14 +477,14 @@ readBgTileRowBaseAddress index y bus = do
     rowOffset = fromIntegral (y `mod` 8) * 2
 
 -- Interruption
-data Interrupt = VBlank | LCDStat | Timer | Serial | Joypad  deriving (Show, Eq, Enum)
+data Interrupt = VBlank | LCDStat | Timer | Serial | JoypadInt  deriving (Show, Eq, Enum)
 
 interruptAddress :: Interrupt -> Address
 interruptAddress VBlank = 0x40
 interruptAddress LCDStat = 0x48
 interruptAddress Timer = 0x50
 interruptAddress Serial = 0x58
-interruptAddress Joypad = 0x60
+interruptAddress JoypadInt = 0x60
 
 filterM :: Monad m => (a -> m Bool) -> [a] -> m [a]
 filterM _ [] = return []
@@ -484,7 +499,7 @@ filterInterrupts :: (Bus -> IO Word8) -> Bus -> IO Interrupts
 filterInterrupts f bus = filterM (\int -> do
                                     b <- f bus
                                     return $ b `testBit` fromEnum int
-                                ) [VBlank .. Joypad]
+                                ) [VBlank .. JoypadInt]
 
 readIE :: Bus -> IO Interrupts
 readIE = filterInterrupts $ readByte 0xFFFF
@@ -507,3 +522,21 @@ writeIF int val bus = do
   let update = if val then setBit else clearBit
   writeByte 0xFF0F (b `update` bit) bus
   return ()
+
+readJOYP :: Bus -> IO Word8
+readJOYP = readByte 0xFF00
+
+data JoypadKey = AKey | BKey | SelectKey | StartKey | RightKey | LeftKey | UpKey | DownKey deriving (Show, Eq, Enum)
+
+requestJoypadInt :: Word8 -> Word8 -> Bus -> IO ()
+requestJoypadInt oldVal val bus =
+  when ((oldVal .&. complement val .&. 0x0F) /= 0) $ writeIF JoypadInt True bus
+
+setJoypad :: JoypadKey -> Bool -> Bus -> IO ()
+setJoypad key b bus = do
+  oldJoyp <- readJOYP bus
+  oldVal <- readIORef bus.joypad
+  writeIORef bus.joypad $ if b then clearBit oldVal (fromEnum key)
+                          else setBit oldVal (fromEnum key)
+  joyp <- readJOYP bus
+  requestJoypadInt oldJoyp joyp bus

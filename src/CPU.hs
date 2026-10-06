@@ -124,7 +124,7 @@ push8 val cpu = do
   let regs = cpu.registers
       bus = cpu.bus
       sp = regs.rSP - 1
-  _ <- writeByte sp val bus
+  writeByte sp val bus
   return cpu {registers = regs {rSP = sp}}
 
 push8High :: Word16 -> CPU -> IO CPU
@@ -252,17 +252,17 @@ executeInstruction cpu op = do
     LD_r16_imm16 r16 val -> do
       return (cpu {registers = writeR16 regs r16 val}, 0)
     LDH_AtImm8_A offset -> do
-      _ <- writeByteHighMemory offset regs.rA bus
+      writeByteHighMemory offset regs.rA bus
       return (cpu, 4)
     LD_AtR16mem_A dst ->
       let srcAddr = readR16Mem regs dst
        in do
             val <- readR8 regs bus A
-            _ <- writeByte srcAddr val bus
+            writeByte srcAddr val bus
             return (cpu {registers = updateR16MemHL dst regs}, 4)
     LD_Addr16_A addr -> do
       a <- readR8 regs bus A
-      _ <- writeByte addr a bus
+      writeByte addr a bus
       return (cpu, 4)
     LDH_A_AtImm8 addr8 -> do
       val <- readByteHighMemory addr8 bus
@@ -323,7 +323,7 @@ executeInstruction cpu op = do
       regs1 <- writeR8 regs bus r8 val
       return (cpu {registers = regs1}, memoryCycles r8)
     LDH_AtC_A -> do
-      _ <- writeByteHighMemory regs.rC regs.rA bus
+      writeByteHighMemory regs.rC regs.rA bus
       return (cpu, 4)
     INC_r8 SubOpRead r8 -> do
       val <- readR8 regs bus r8

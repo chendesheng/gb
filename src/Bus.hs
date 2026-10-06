@@ -155,27 +155,27 @@ readBytes addr n bus
       bs <- readBytes (addr + 1) (n - 1) bus
       return $ b : bs
 
-writeByte :: Address -> Word8 -> Bus -> IO Bus
+writeByte :: Address -> Word8 -> Bus -> IO ()
 writeByte addr val bus
   -- addr < 0x8000  Usually cartridge/MBC control
   | 0x8000 <= addr && addr < 0xA000 = do
       -- VRAM is inaccessible in mode 3
       mode <- readPPUMode bus.io
       if mode == 3 then
-        return bus
+        return ()
       else do
         writeRam (addr - 0x8000) val bus.vram
-        return bus
+        return ()
   | 0xC000 <= addr && addr < 0xE000 = do
       writeRam (addr - 0xC000) val bus.wram
-      return bus
+      return ()
   | 0xFE00 <= addr && addr < 0xFEA0 = do
       mode <- readPPUMode bus.io
       if mode == 2 || mode == 3 then
-        return bus
+        return ()
       else do
         writeRam (addr - 0xFE00) val bus.oam
-        return bus
+        return ()
   | 0xFF40 == addr = do
       updateSTATInterrupt bus $ do
         wasOn <- isLcdOn bus
@@ -184,7 +184,7 @@ writeByte addr val bus
           syncPPURegisters 0 0 bus
         else
           unless wasOn $ syncPPURegisters 0 2 bus
-      return bus
+      return ()
   | 0xFF41 == addr = do
       updateSTATInterrupt bus $ do
         -- the lower 3 bits are readonly
@@ -193,8 +193,8 @@ writeByte addr val bus
         let b' = b .&. 0x07 -- b00000111
         let val' = val .&. 0xF8 -- b11111000
         writeRam 0x41 (val' .|. b') bus.io
-      return bus
-  | 0xFF44 == addr = return bus -- LY is readonly
+      return ()
+  | 0xFF44 == addr = return () -- LY is readonly
   | 0xFF45 == addr = do -- LY compare
       updateSTATInterrupt bus $ do
         ly <- readLcdY bus
@@ -204,22 +204,22 @@ writeByte addr val bus
           writeRam 0x41 (status `setBit` 2) bus.io
         else
           writeRam 0x41 (status `clearBit` 2) bus.io
-      return bus
+      return ()
   | 0xFF50 == addr = do
       -- 0xFF50 disables boot ROM
       b <- readByte0xFF50 bus
       writeRam 0x50 (val .|. b) bus.io
-      return bus
+      return ()
   | 0xFF00 <= addr && addr < 0xFF80 = do
       writeRam (addr - 0xFF00) val bus.io
-      return bus
+      return ()
   | 0xFF80 <= addr && addr < 0xFFFF = do
       writeRam (addr - 0xFF80) val bus.hram
-      return bus
+      return ()
   | addr == 0xFFFF = do
       writeIORef bus.ie val
-      return bus
-  | otherwise = return bus
+      return ()
+  | otherwise = return ()
 
 readPPUMode :: Ram -> IO Word8
 readPPUMode io = do
@@ -229,7 +229,7 @@ readPPUMode io = do
 readByteHighMemory :: Word8 -> Bus -> IO Word8
 readByteHighMemory offset = readByte (0xFF00 + fromIntegral offset)
 
-writeByteHighMemory :: Word8 -> Word8 -> Bus -> IO Bus
+writeByteHighMemory :: Word8 -> Word8 -> Bus -> IO ()
 writeByteHighMemory offset = writeByte $ 0xFF00 + fromIntegral offset
 
 byteStringToVector :: BL.ByteString -> V.Vector Word8
@@ -259,7 +259,7 @@ writeR8 regs _ E val = return $ regs {rE = val}
 writeR8 regs _ H val = return $ regs {rH = val}
 writeR8 regs _ L val = return $ regs {rL = val}
 writeR8 regs bus AtHL val = do
-  _ <- writeByte (getHL regs) val bus
+  writeByte (getHL regs) val bus
   return regs
 writeR8 regs _ A val = return $ regs {rA = val}
 
@@ -392,7 +392,7 @@ syncPPU ly mode bus = updateSTATInterrupt bus $ syncPPURegisters ly mode bus
 syncPPURegisters :: Word8 -> Word8 -> Bus -> IO ()
 syncPPURegisters ly mode bus = do
   -- TODO: there are other things need update
-  _ <- writeRam 0x44 ly bus.io
+  writeRam 0x44 ly bus.io
   lyc <- readRam 0x45 bus.io
 
   status <- readRam 0x41 bus.io
@@ -494,7 +494,7 @@ writeIE int val bus = do
   b <- readByte 0xFFFF bus
   let bit = fromEnum int
   let update = if val then setBit else clearBit
-  _ <- writeByte 0xFFFF (b `update` bit) bus
+  writeByte 0xFFFF (b `update` bit) bus
   return ()
 
 readIF :: Bus -> IO Interrupts
@@ -505,5 +505,5 @@ writeIF int val bus = do
   b <- readByte 0xFF0F bus
   let bit = fromEnum int
   let update = if val then setBit else clearBit
-  _ <- writeByte 0xFF0F (b `update` bit) bus
+  writeByte 0xFF0F (b `update` bit) bus
   return ()

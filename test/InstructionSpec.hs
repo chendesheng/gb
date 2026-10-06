@@ -111,7 +111,7 @@ spec = describe "Instruction" $ do
     hflag cpu3.registers `shouldBe` True
   it "LD_A_AtR16mem HLd" $ do
     cpu <- testCPU
-    _ <- writeByte 0x8001 0xAA cpu.bus
+    writeByte 0x8001 0xAA cpu.bus
     cpu1 <- cpuInitR8 [(H, 0x80), (L, 0x01)] cpu
     (cpu2, 4) <- executeInstruction cpu1 $ LD_A_AtR16mem HLd
     cpu2.registers.rL `shouldBe` 0x00
@@ -162,16 +162,16 @@ spec = describe "Instruction" $ do
   it "POP AFstk" $ do
     cpu <-  cpuSetFlags 0x80 <$> (testCPU >>= cpuWriteR8 A 0x80)
     cpu1 <- cpuWriteR16 SP 0xFFF0 cpu
-    _ <- writeByte 0xFFF0 0xBF cpu1.bus
-    _ <- writeByte 0xFFF1 0x12 cpu1.bus
+    writeByte 0xFFF0 0xBF cpu1.bus
+    writeByte 0xFFF1 0x12 cpu1.bus
     (cpu2, 8) <- executeInstructionSteps cpu1 $ POP SubOpPopLow AFstk
     cpu2.registers.rSP `shouldBe` 0xFFF2
     cpu2.registers.rA `shouldBe` 0x12
     cpu2.registers.rF `shouldBe` 0xB0
   it "POP BCstk" $ do
     cpu <- testCPU >>= cpuWriteR16 SP 0xFFF0
-    _ <- writeByte 0xFFF0 0x34 cpu.bus
-    _ <- writeByte 0xFFF1 0x12 cpu.bus
+    writeByte 0xFFF0 0x34 cpu.bus
+    writeByte 0xFFF1 0x12 cpu.bus
     (cpu1, 8) <- executeInstructionSteps cpu $ POP SubOpPopLow BCstk
     cpu1.registers.rSP `shouldBe` 0xFFF2
     getBC cpu1.registers `shouldBe` 0x1234
@@ -186,7 +186,7 @@ spec = describe "Instruction" $ do
     val `shouldBe` 0xAA
   it "LDH_A_AtImm8 0x10" $ do
     cpu <- testCPU
-    _ <- writeByteHighMemory 0x10 0xBB cpu.bus
+    writeByteHighMemory 0x10 0xBB cpu.bus
     (cpu1, 4) <- executeInstruction cpu $ LDH_A_AtImm8 0x10
     cpu1.registers.rA `shouldBe` 0xBB
 

@@ -70,9 +70,9 @@ spec = describe "CPU" $ do
     (cpu1, _) <- executeOneCPUInstruction cpu
     (cpu2, _) <- executeOneCPUInstruction cpu1
     let start = cpu2 {registers = cpu2.registers {rPC = 0x0200, rSP = 0x0000}}
-    _ <- writeByte 0xFFFF 0x04 start.bus -- Enable Timer.
-    _ <- writeByte 0xFF0F 0x04 start.bus -- Request Timer.
-    _ <- writeByte 0xFFFE 0xAA start.bus
+    writeByte 0xFFFF 0x04 start.bus -- Enable Timer.
+    writeByte 0xFF0F 0x04 start.bus -- Request Timer.
+    writeByte 0xFFFE 0xAA start.bus
     let runService elapsed state
           | elapsed == 20 = return state
           | otherwise = do

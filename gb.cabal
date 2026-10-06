@@ -76,7 +76,7 @@ library gb-lib
     -- Import common warning flags.
     import:           warnings, shared
     ghc-options: -fprof-auto -Wno-unused-top-binds
-    exposed-modules: Instruction, Color, Bus, CPU, PPU, Registers
+    exposed-modules: Instruction, Color, Bus, CPU, PPU, Registers, Emulator
     other-modules: Dbg
     -- Directories containing source files.
     hs-source-dirs:   src
@@ -88,7 +88,7 @@ executable gb-exe
     import:           warnings, shared
     hs-source-dirs:   app
     main-is:          Main.hs
-    other-modules:    Paths_gb, NativeMenu, Emulator
+    other-modules:    Paths_gb, NativeMenu
     autogen-modules:  Paths_gb
     ghc-options:      -threaded -rtsopts
     build-depends:    base ^>=4.21.0.0, directory, filepath, h-raylib ^>=6.1.0.0,

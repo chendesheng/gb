@@ -3,15 +3,36 @@ module EmulatorSpec (spec) where
 import Bus (JoypadKey (AKey))
 import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, bracket, mask_)
-import Control.Monad (replicateM_)
+import Control.Monad (foldM, replicateM_, unless)
 import qualified Data.ByteString.Lazy as BL
-import Data.Maybe (isJust, isNothing)
+import Data.Maybe (fromMaybe, isJust, isNothing)
 import Emulator
+import System.Directory (doesFileExist)
+import System.Environment (lookupEnv)
 import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
 spec = describe "Emulator worker" $ do
+  it "runs the Tetris cartridge without an execution error" $ do
+    -- Use a local cartridge rather than including the commercial ROM in the repo.
+    romPath <- fromMaybe "./test/fixtures/tetris.gb" <$> lookupEnv "TETRIS_ROM"
+    exists <- doesFileExist romPath
+    unless exists $ pendingWith "Set TETRIS_ROM to a local Tetris (JUE) (V1.1).gb file"
+    boot <- BL.readFile "resources/dmg.bin"
+    rom <- BL.readFile romPath
+    BL.length rom `shouldBe` 0x8000
+    machine <- powerOn boot rom
+    result <- timeout (30 * 1000000) $ foldM (\current _ -> do
+      next <- advanceFrame current
+      -- Drain every frame so the bounded output queue cannot stall execution.
+      nextDisplay next >>= (`shouldSatisfy` isJust)
+      pure next
+      ) machine [1 .. 1200 :: Int]
+    case result of
+      Nothing -> expectationFailure "Tetris exceeded the 30-second timeout"
+      Just _ -> pure ()
+
   it "does not block the UI when the input queue is full" $ do
     machine <- powerOn BL.empty BL.empty
     trySetJoypadKey AKey True machine `shouldReturn` True

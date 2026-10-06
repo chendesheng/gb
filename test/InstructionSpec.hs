@@ -3,7 +3,7 @@ module InstructionSpec (spec) where
 import Bus (readByte, readByteHighMemory, readR16, writeR8, writeByte, writeR16, writeByteHighMemory, initBus)
 import CPU (CPU (..), executeInstruction, initCPU)
 import qualified CPU
-import Control.Monad (foldM)
+import Control.Monad (foldM, forM_)
 import Data.Binary.Get (runGet)
 import Data.Maybe (fromJust)
 import Data.ByteString.Lazy as BL
@@ -15,6 +15,23 @@ import Test.Hspec
 
 spec :: SpecWith ()
 spec = describe "Instruction" $ do
+  forM_
+    [ (0x0F, 0x60, 0x09, 0x40)
+    , (0xFF, 0x50, 0x9F, 0x50)
+    , (0x00, 0x70, 0x9A, 0x50)
+    , (0x9A, 0x00, 0x00, 0x90)
+    , (0x00, 0x10, 0x60, 0x10)
+    , (0x00, 0x30, 0x66, 0x10)
+    , (0xFA, 0x00, 0x60, 0x10)
+    , (0x99, 0x80, 0x99, 0x00)
+    , (0x00, 0x40, 0x00, 0xC0)
+    ] $ \(a, flags, expectedA, expectedFlags) ->
+      it ("DAA with A/flags " ++ show (a, flags)) $ do
+        cpu <- testCPU
+        let regs = cpu.registers {rA = a, rF = flags}
+        (cpu', cycles) <- executeInstruction cpu {registers = regs} DAA
+        cpu'.registers `shouldBe` regs {rA = expectedA, rF = expectedFlags}
+        cycles `shouldBe` 0
   it "decode 0x31" $ do
     let bs = BL.pack [0x31, 0xFE, 0xFF]
     runGet instructionDecoder bs `shouldBe` I.Instruction (LD_r16_imm16 SP 0xFFFE) 3
@@ -147,11 +164,12 @@ spec = describe "Instruction" $ do
     h `shouldBe` 0x12
   it "PREFIX_CB (RL C)" $ do
     cpu <- cpuSetFlags 0x00 <$> (testCPU >>= cpuWriteR8 C 0x80)
-    (cpu1, 0) <- executeInstruction cpu $ PREFIX_CB $ RL C
-    zflag cpu1.registers `shouldBe` True
-    nflag cpu1.registers `shouldBe` False
-    hflag cpu1.registers `shouldBe` False
-    cflag cpu1.registers `shouldBe` True
+    (cpu1, 0) <- executeInstruction cpu $ PREFIX_CB $ RL SubOpRead C
+    (cpu2, 0) <- executeInstructionSteps cpu1 $ fromJust cpu1.currentInstruction
+    zflag cpu2.registers `shouldBe` True
+    nflag cpu2.registers `shouldBe` False
+    hflag cpu2.registers `shouldBe` False
+    cflag cpu2.registers `shouldBe` True
   it "RLA" $ do
     cpu <- cpuSetFlags 0x00 <$> (testCPU >>= cpuWriteR8 A 0x80)
     (cpu1, 0) <- executeInstruction cpu RLA

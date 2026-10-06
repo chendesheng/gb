@@ -2,7 +2,6 @@ module Registers where
 
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.Word
-import Dbg
 
 data Cond = NZ | Z | NC | Cc
   deriving (Show, Eq)
@@ -139,3 +138,13 @@ updateR16MemHL _ = id
 
 getB3 :: Word8 -> Word8 -> Bool
 getB3 b3 val = val `shiftR` fromIntegral b3 .&. 0x01 /= 0
+
+modifyR8 :: R8 -> (Word8 -> Word8) -> Registers -> Registers
+modifyR8 B f regs = regs {rB = f regs.rB}
+modifyR8 C f regs = regs {rC = f regs.rC}
+modifyR8 D f regs = regs {rD = f regs.rD}
+modifyR8 E f regs = regs {rE = f regs.rE}
+modifyR8 H f regs = regs {rH = f regs.rH}
+modifyR8 L f regs = regs {rL = f regs.rL}
+modifyR8 A f regs = regs {rA = f regs.rA}
+modifyR8 AtHL _ regs = regs

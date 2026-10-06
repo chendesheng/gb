@@ -27,14 +27,14 @@ data ALUOp = ADD | ADC | SUB | SBC | AND | XOR | OR | CP
   deriving (Show, Eq)
 
 data CBOp
-  = RLC R8
-  | RRC R8
-  | RL R8
-  | RR R8
-  | SLA R8
-  | SRA R8
-  | SWAP R8
-  | SRL R8
+  = RLC SubOpMem R8
+  | RRC SubOpMem R8
+  | RL SubOpMem R8
+  | RR SubOpMem R8
+  | SLA SubOpMem R8
+  | SRA SubOpMem R8
+  | SWAP SubOpMem R8
+  | SRL SubOpMem R8
   | BIT Word8 R8
   | RES SubOpMem Word8 R8
   | SET SubOpMem Word8 R8
@@ -106,7 +106,7 @@ data OpCode
   | RLCA
   | RRA
   | RRCA
-  | RST Word16
+  | RST SubOpPush Word16
   | SCF
   | STOP
   deriving (Show, Eq)
@@ -124,14 +124,14 @@ cbOpDecoder = do
       bitIndex = (b `shiftR` 3) .&. 0x07
   return $ case b `shiftR` 6 of
     0 -> case bitIndex of
-      0 -> RLC r8
-      1 -> RRC r8
-      2 -> RL r8
-      3 -> RR r8
-      4 -> SLA r8
-      5 -> SRA r8
-      6 -> SWAP r8
-      _ -> SRL r8
+      0 -> RLC SubOpRead r8
+      1 -> RRC SubOpRead r8
+      2 -> RL SubOpRead r8
+      3 -> RR SubOpRead r8
+      4 -> SLA SubOpRead r8
+      5 -> SRA SubOpRead r8
+      6 -> SWAP SubOpRead r8
+      _ -> SRL SubOpRead r8
     1 -> BIT bitIndex r8
     2 -> RES SubOpRead bitIndex r8
     _ -> SET SubOpRead bitIndex r8
@@ -231,7 +231,7 @@ opCodeDecoder = do
     0xc4 -> CALL_cond_imm16 NZ <$> getWord16le
     0xc5 -> return $ PUSH SubOpPushWait BCstk
     0xc6 -> ALU_A_imm8 ADD <$> getWord8
-    0xc7 -> return $ RST 0x00
+    0xc7 -> return $ RST SubOpPushWait 0x00
     0xc8 -> return $ RET_cond Z
     0xc9 -> return $ RET SubOpPopLow
     0xca -> JP_cond_imm16 Z <$> getWord16le
@@ -239,44 +239,44 @@ opCodeDecoder = do
     0xcc -> CALL_cond_imm16 Z <$> getWord16le
     0xcd -> CALL_addr16 SubOpCallWait <$> getWord16le
     0xce -> ALU_A_imm8 ADC <$> getWord8
-    0xcf -> return $ RST 0x08
+    0xcf -> return $ RST SubOpPushWait 0x08
     0xd0 -> return $ RET_cond NC
     0xd1 -> return $ POP SubOpPopLow DEstk
     0xd2 -> JP_cond_imm16 NC <$> getWord16le
     0xd4 -> CALL_cond_imm16 NC <$> getWord16le
     0xd5 -> return $ PUSH SubOpPushWait DEstk
     0xd6 -> ALU_A_imm8 SUB <$> getWord8
-    0xd7 -> return $ RST 0x10
+    0xd7 -> return $ RST SubOpPushWait 0x10
     0xd8 -> return $ RET_cond Cc
     0xd9 -> return $ RETI SubOpPopLow
     0xda -> JP_cond_imm16 Cc <$> getWord16le
     0xdc -> CALL_cond_imm16 Cc <$> getWord16le
     0xde -> ALU_A_imm8 SBC <$> getWord8
-    0xdf -> return $ RST 0x18
+    0xdf -> return $ RST SubOpPushWait 0x18
     0xe0 -> LDH_AtImm8_A <$> getWord8
     0xe1 -> return $ POP SubOpPopLow HLstk
     0xe2 -> return LDH_AtC_A
     0xe5 -> return $ PUSH SubOpPushWait HLstk
     0xe6 -> ALU_A_imm8 AND <$> getWord8
-    0xe7 -> return $ RST 0x20
+    0xe7 -> return $ RST SubOpPushWait 0x20
     0xe8 -> ADD_SP_imm8 <$> getInt8
     0xe9 -> return JP_HL
     0xea -> LD_Addr16_A <$> getWord16le
     0xee -> ALU_A_imm8 XOR <$> getWord8
-    0xef -> return $ RST 0x28
+    0xef -> return $ RST SubOpPushWait 0x28
     0xf0 -> LDH_A_AtImm8 <$> getWord8
     0xf1 -> return $ POP SubOpPopLow AFstk
     0xf2 -> return LDH_A_C
     0xf3 -> return DI
     0xf5 -> return $ PUSH SubOpPushWait AFstk
     0xf6 -> ALU_A_imm8 OR <$> getWord8
-    0xf7 -> return $ RST 0x30
+    0xf7 -> return $ RST SubOpPushWait 0x30
     0xf8 -> LD_HL_SP_plus_imm8 <$> getInt8
     0xf9 -> return LD_SP_HL
     0xfa -> LD_A_imm16 <$> getWord16le
     0xfb -> return EI
     0xfe -> ALU_A_imm8 CP <$> getWord8
-    0xff -> return $ RST 0x38
+    0xff -> return $ RST SubOpPushWait 0x38
     _ -> return $ INVALID b
 
 instructionDecoder :: Get Instruction

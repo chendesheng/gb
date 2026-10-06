@@ -17,10 +17,10 @@ import Bus
     readIF,
     readIE,
     writeIF,
-    resetDIV,
     Interrupts,
     interruptAddress,
     increaseTimer,
+    executeDMACopy,
   )
 import Data.Bits ((.<<.), xor, (.>>.), (.&.), (.|.), complement)
 import Data.Function ((&))
@@ -36,6 +36,7 @@ data CPU = CPU
   , bus :: Bus
   , ime :: InterruptStep
   , currentInstruction :: Maybe OpCode
+  , pendingWrite :: Maybe (Address, Word8)
   }
 
 data InterruptStep
@@ -47,7 +48,7 @@ data InterruptServiceStep = IntSrvWriteSPHigh | IntSrvWriteSPLow | IntSrvJmp Int
 
 initCPU :: Bus -> CPU
 initCPU bus = do
-  CPU {registers=initialRegisters, bus=bus, ime=Disabled, currentInstruction=Nothing}
+  CPU {registers=initialRegisters, bus=bus, ime=Disabled, currentInstruction=Nothing, pendingWrite=Nothing}
 
 advanceAddr :: Address -> Int8 -> Word16
 advanceAddr pc imm8 =
@@ -67,21 +68,30 @@ addWithCarry a b carry =
       halfCarry = ((a .&. 0x0F) + (b .&. 0x0F) + fromIntegral carryIn) > 0x0F
    in (result, carryOut, halfCarry)
 
+addSignedToSP :: Word16 -> Int8 -> (Word16, Bool, Bool)
+addSignedToSP sp offset =
+  let unsignedOffset = fromIntegral (fromIntegral offset :: Word8) :: Word16
+      result = fromIntegral ((fromIntegral sp :: Int) + fromIntegral offset)
+      halfCarry = (sp .&. 0x0F) + (unsignedOffset .&. 0x0F) > 0x0F
+      carry = (sp .&. 0xFF) + unsignedOffset > 0xFF
+   in (result, carry, halfCarry)
+
 -- TODO: make timer accurate, need split to per M-cycle
 execute :: CPU -> IO (CPU, Word8)
 execute cpu = do
-  (cpu1, cycles) <- go cpu
-  if cycles > 0 then do
-    increaseTimer cycles cpu1.bus
-    return (cpu1, cycles)
+  (cpu1, elapsed) <- go cpu
+  if elapsed > 0 then do
+    executeDMACopy elapsed cpu.bus
+    increaseTimer elapsed cpu1.bus
+    return (cpu1, elapsed)
   else
-    return (cpu1, cycles)
+    return (cpu1, elapsed)
   where
     go cpu =
       case cpu.currentInstruction of
           Nothing -> do
             (cpu, elapsed) <- executeInterruption cpu
-            if elapsed > 0 then
+            if elapsed > 0 then do
               return (cpu, elapsed)
             else do
                 ins <- fetchInstruction cpu.registers.rPC cpu.bus
@@ -96,6 +106,7 @@ execute cpu = do
             if null (ie `intersect` if_)
               then return (cpu, 1)
               else go cpu{currentInstruction = Nothing}
+          Just (INVALID _) -> return (cpu, 1)
           Just op -> do
             (cpu', elapsed) <- executeInstruction cpu{currentInstruction=Nothing} op
             return (cpu', elapsed)
@@ -130,7 +141,8 @@ condSatisfied :: Cond -> Registers -> Bool
 condSatisfied cond regs = case cond of
   NZ -> not $ zflag regs
   Z -> zflag regs
-  _ -> todo $ "cond " ++ show cond
+  NC -> not $ cflag regs
+  Cc -> cflag regs
 
 push8 :: Word8 -> CPU -> IO CPU
 push8 val cpu = do
@@ -167,7 +179,7 @@ highByte addr = addr .>>. 8 .&. 0xFF & fromIntegral
 lowByte :: Word16 -> Word8
 lowByte = fromIntegral
 
--- Return execution T-cycles only; instruction fetching is timed by execute.
+-- Return execution M-cycles only; instruction fetching is timed by execute.
 executeInstruction :: CPU -> OpCode -> IO (CPU, Word8)
 executeInstruction cpu op = do
   let bus = cpu.bus
@@ -175,6 +187,37 @@ executeInstruction cpu op = do
   case op of
     NOP -> return (cpu, 0)
     HALT -> return (cpu{currentInstruction=Just HALT}, 0)
+    ALU_A_imm8 ADC val -> do
+      dstVal <- readR8 regs bus A
+      let (a, carry, half) = addWithCarry dstVal val (cflag regs)
+      regs1 <- writeR8 regs bus A a
+      return
+        ( cpu
+            { registers =
+                regs1
+                  & setZflag (a == 0)
+                  & setNflag False
+                  & setCflag carry
+                  & setHflag half
+            },
+          0
+        )
+    ALU_A_imm8 SBC val -> do
+      dstVal <- readR8 regs bus A
+      let borrow = if cflag regs then 1 else 0 :: Int
+          a = dstVal - val - fromIntegral borrow
+      regs1 <- writeR8 regs bus A a
+      return
+        ( cpu
+            { registers =
+                regs1
+                  & setZflag (a == 0)
+                  & setNflag True
+                  & setCflag (fromIntegral dstVal < (fromIntegral val + borrow :: Int))
+                  & setHflag ((dstVal .&. 0x0F) < ((val .&. 0x0F) + fromIntegral borrow))
+            },
+          0
+        )
     ALU_A_R8 ADD src -> do
       dstVal <- readR8 regs bus A
       srcVal <- readR8 regs bus src
@@ -239,6 +282,22 @@ executeInstruction cpu op = do
             },
           memoryCycles src
         )
+    ALU_A_R8 AND src -> do
+      srcVal <- readR8 regs bus src
+      dstVal <- readR8 regs bus A
+      let a = srcVal .&. dstVal
+      regs1 <- writeR8 regs bus A a
+      return
+        ( cpu
+            { registers =
+                regs1
+                  & setZflag (a == 0)
+                  & setNflag False
+                  & setCflag False
+                  & setHflag True
+            },
+          memoryCycles src
+        )
     ALU_A_R8 CP src -> do
       a <- readR8 regs bus A
       srcVal <- readR8 regs bus src
@@ -249,6 +308,39 @@ executeInstruction cpu op = do
               & setHflag ((a .&. 0x0F) < (srcVal .&. 0x0F))
               & setCflag (a < srcVal)
       return (cpu {registers = regs'}, memoryCycles src)
+    ALU_A_R8 ADC src -> do
+      dstVal <- readR8 regs bus A
+      srcVal <- readR8 regs bus src
+      let (a, carry, half) = addWithCarry dstVal srcVal (cflag regs)
+      regs1 <- writeR8 regs bus A a
+      return
+        ( cpu
+            { registers =
+                regs1
+                  & setZflag (a == 0)
+                  & setNflag False
+                  & setCflag carry
+                  & setHflag half
+            },
+          memoryCycles src
+        )
+    ALU_A_R8 SBC src -> do
+      dstVal <- readR8 regs bus A
+      srcVal <- readR8 regs bus src
+      let borrow = if cflag regs then 1 else 0 :: Int
+          a = dstVal - srcVal - fromIntegral borrow
+      regs1 <- writeR8 regs bus A a
+      return
+        ( cpu
+            { registers =
+                regs1
+                  & setZflag (a == 0)
+                  & setNflag True
+                  & setCflag (fromIntegral dstVal < (fromIntegral srcVal + borrow :: Int))
+                  & setHflag ((dstVal .&. 0x0F) < ((srcVal .&. 0x0F) + fromIntegral borrow))
+            },
+          memoryCycles src
+        )
     ALU_A_imm8 CP n -> do
       a <- readR8 regs bus A
       let regs' =
@@ -258,6 +350,81 @@ executeInstruction cpu op = do
               & setHflag ((a .&. 0x0F) < (n .&. 0x0F))
               & setCflag (a < n)
       return (cpu {registers = regs'}, 0)
+    ALU_A_imm8 AND n -> do
+      dstVal <- readR8 regs bus A
+      let a = dstVal .&. n
+      regs1 <- writeR8 regs bus A a
+      return
+        ( cpu
+            { registers =
+                regs1
+                  & setZflag (a == 0)
+                  & setNflag False
+                  & setCflag False
+                  & setHflag True
+            },
+          0
+        )
+    ALU_A_imm8 ADD n -> do
+      dstVal <- readR8 regs bus A
+      let (a, carry, half) = addWithCarry dstVal n False
+      regs1 <- writeR8 regs bus A a
+      return
+        ( cpu
+            { registers =
+                regs1
+                  & setZflag (a == 0)
+                  & setNflag False
+                  & setCflag carry
+                  & setHflag half
+            },
+          0
+        )
+    ALU_A_imm8 SUB n -> do
+      dstVal <- readR8 regs bus A
+      let a = dstVal - n
+      regs1 <- writeR8 regs bus A a
+      return
+        ( cpu
+            { registers =
+                regs1
+                  & setZflag (a == 0)
+                  & setNflag True
+                  & setCflag (dstVal < n)
+                  & setHflag ((dstVal .&. 0x0F) < (n .&. 0x0F))
+            },
+          0
+        )
+    ALU_A_imm8 XOR n -> do
+      dstVal <- readR8 regs bus A
+      let a = dstVal `xor` n
+      regs1 <- writeR8 regs bus A a
+      return
+        ( cpu
+            { registers =
+                regs1
+                  & setZflag (a == 0)
+                  & setNflag False
+                  & setCflag False
+                  & setHflag False
+            },
+          0
+        )
+    ALU_A_imm8 OR n -> do
+      dstVal <- readR8 regs bus A
+      let a = dstVal .|. n
+      regs1 <- writeR8 regs bus A a
+      return
+        ( cpu
+            { registers =
+                regs1
+                  & setZflag (a == 0)
+                  & setNflag False
+                  & setCflag False
+                  & setHflag False
+            },
+          0
+        )
     LD_r8_r8 dst src -> do
       val <- readR8 regs bus src
       regs1 <- writeR8 regs bus dst val
@@ -277,9 +444,26 @@ executeInstruction cpu op = do
       a <- readR8 regs bus A
       writeByte addr a bus
       return (cpu, 1)
+    LD_imm16_SP addr -> do
+      case cpu.pendingWrite of
+        Nothing -> do
+          let sp = readR16 regs SP
+          writeByte addr (lowByte sp) bus
+          return (cpu {currentInstruction=Just op, pendingWrite=Just (addr + 1, highByte sp)}, 1)
+        Just (address, value) -> do
+          writeByte address value bus
+          return (cpu {currentInstruction=Nothing, pendingWrite=Nothing}, 1)
+    LDH_A_C -> do
+      val <- readByteHighMemory regs.rC bus
+      regs' <- writeR8 regs bus A val
+      return (cpu {registers = regs'}, 1)
     LDH_A_AtImm8 addr8 -> do
       val <- readByteHighMemory addr8 bus
       regs' <- writeR8 regs bus A val
+      return (cpu {registers = regs'}, 1)
+    LD_A_imm16 val -> do
+      val' <- readByte val bus
+      regs' <- writeR8 regs bus A val'
       return (cpu {registers = regs'}, 1)
     JR_imm8 offset ->
       return (cpu {registers = advancePC offset cpu.registers}, 1)
@@ -301,8 +485,64 @@ executeInstruction cpu op = do
             },
           memoryCycles r8
         )
-    PREFIX_CB (RL r8) -> do
+    PREFIX_CB (SRL SubOpRead r8) -> do
       val <- readR8 regs bus r8
+      return (cpu{currentInstruction=Just (PREFIX_CB (SRL (SubOpWrite val) r8))}, memoryCycles r8)
+    PREFIX_CB (SRL (SubOpWrite val) r8) -> do
+      let newc = (val .&. 0x01) /= 0
+          val' = val .>>. 1
+      regs' <-
+        writeR8
+          ( regs
+              & setZflag (val' == 0)
+              & setNflag False
+              & setHflag False
+              & setCflag newc
+          )
+          bus
+          r8
+          val'
+      return (cpu {registers = regs'}, memoryCycles r8)
+    PREFIX_CB (SRA SubOpRead r8) -> do
+      val <- readR8 regs bus r8
+      return (cpu{currentInstruction=Just (PREFIX_CB (SRA (SubOpWrite val) r8))}, memoryCycles r8)
+    PREFIX_CB (SRA (SubOpWrite val) r8) -> do
+      let newc = (val .&. 0x01) /= 0
+          val' = val .>>. 1 .|. (val .&. 0x80)
+      regs' <-
+        writeR8
+          ( regs
+              & setZflag (val' == 0)
+              & setNflag False
+              & setHflag False
+              & setCflag newc
+          )
+          bus
+          r8
+          val'
+      return (cpu {registers = regs'}, memoryCycles r8)
+    PREFIX_CB (RLC SubOpRead r8) -> do
+      val <- readR8 regs bus r8
+      return (cpu{currentInstruction=Just (PREFIX_CB (RLC (SubOpWrite val) r8))}, memoryCycles r8)
+    PREFIX_CB (RLC (SubOpWrite val) r8) -> do
+      let newc = (val .&. 0x80) /= 0
+          val' = val .<<. 1 .|. (val .>>. 7)
+      regs' <-
+        writeR8
+          ( regs
+              & setZflag (val' == 0)
+              & setNflag False
+              & setHflag False
+              & setCflag newc
+          )
+          bus
+          r8
+          val'
+      return (cpu {registers = regs'}, memoryCycles r8)
+    PREFIX_CB (RL SubOpRead r8) -> do
+      val <- readR8 regs bus r8
+      return (cpu{currentInstruction=Just (PREFIX_CB (RL (SubOpWrite val) r8))}, memoryCycles r8)
+    PREFIX_CB (RL (SubOpWrite val) r8) -> do
       let c = cflag regs
           newc = (val .&. 0x80) /= 0
           val' = val .<<. 1 .|. (if c then 1 else 0)
@@ -317,7 +557,26 @@ executeInstruction cpu op = do
           bus
           r8
           val'
-      return (cpu {registers = regs'}, 2 * memoryCycles r8)
+      return (cpu {registers = regs'}, memoryCycles r8)
+    PREFIX_CB (RR SubOpRead r8) -> do
+      val <- readR8 regs bus r8
+      return (cpu{currentInstruction=Just (PREFIX_CB (RR (SubOpWrite val) r8))}, memoryCycles r8)
+    PREFIX_CB (RR (SubOpWrite val) r8) -> do
+      let c = cflag regs
+          newc = (val .&. 0x01) /= 0
+          val' = val .>>. 1 .|. (if c then 0x80 else 0)
+      regs' <-
+        writeR8
+          ( regs
+              & setZflag (val' == 0)
+              & setNflag False
+              & setHflag False
+              & setCflag newc
+          )
+          bus
+          r8
+          val'
+      return (cpu {registers = regs'}, memoryCycles r8)
     PREFIX_CB (RES SubOpRead b3 r8) -> do
       val <- readR8 regs bus r8
       return (cpu{currentInstruction=Just (PREFIX_CB (RES (SubOpWrite val) b3 r8))}, memoryCycles r8)
@@ -331,6 +590,59 @@ executeInstruction cpu op = do
     PREFIX_CB (SET (SubOpWrite val) b3 r8) -> do
       let val' = val .|. (1 .<<. fromIntegral b3)
       regs' <- writeR8 regs bus r8 val'
+      return (cpu {registers = regs'}, memoryCycles r8)
+    PREFIX_CB (SWAP SubOpRead r8) -> do
+      val <- readR8 regs bus r8
+      return (cpu{currentInstruction=Just (PREFIX_CB (SWAP (SubOpWrite val) r8))}, memoryCycles r8)
+    PREFIX_CB (SWAP (SubOpWrite val) r8) -> do
+      let val' = (val .<<. 4) .|. (val .>>. 4)
+      regs' <-
+        writeR8
+          ( regs
+              & setZflag (val' == 0)
+              & setNflag False
+              & setHflag False
+              & setCflag False
+          )
+          bus
+          r8
+          val'
+      return (cpu {registers = regs'}, memoryCycles r8)
+    PREFIX_CB (SLA SubOpRead r8) -> do
+      val <- readR8 regs bus r8
+      return (cpu{currentInstruction=Just (PREFIX_CB (SLA (SubOpWrite val) r8))}, memoryCycles r8)
+    PREFIX_CB (SLA (SubOpWrite val) r8) -> do
+      let newc = (val .&. 0x80) /= 0
+          val' = val .<<. 1
+      regs' <-
+        writeR8
+          ( regs
+              & setZflag (val' == 0)
+              & setNflag False
+              & setHflag False
+              & setCflag newc
+          )
+          bus
+          r8
+          val'
+      return (cpu {registers = regs'}, memoryCycles r8)
+    PREFIX_CB (RRC SubOpRead r8) -> do
+      val <- readR8 regs bus r8
+      return (cpu{currentInstruction=Just (PREFIX_CB (RRC (SubOpWrite val) r8))}, memoryCycles r8)
+    PREFIX_CB (RRC (SubOpWrite val) r8) -> do
+      let newc = (val .&. 0x01) /= 0
+          val' = val .>>. 1 .|. (val .<<. 7)
+      regs' <-
+        writeR8
+          ( regs
+              & setZflag (val' == 0)
+              & setNflag False
+              & setHflag False
+              & setCflag newc
+          )
+          bus
+          r8
+          val'
       return (cpu {registers = regs'}, memoryCycles r8)
     LD_r8_imm8 r8 val -> do
       regs1 <- writeR8 regs bus r8 val
@@ -378,11 +690,33 @@ executeInstruction cpu op = do
       let val = readR16 regs BC
           regs' = writeR16 regs BC $ val - 1
       return (cpu {registers = regs'}, 1)
+    DEC_r16 DE -> do
+      let val = readR16 regs DE
+          regs' = writeR16 regs DE $ val - 1
+      return (cpu {registers = regs'}, 1)
+    DEC_r16 HL -> do
+      let val = readR16 regs HL
+          regs' = writeR16 regs HL $ val - 1
+      return (cpu {registers = regs'}, 1)
+    DEC_r16 SP -> do
+      let val = readR16 regs SP
+          regs' = writeR16 regs SP $ val - 1
+      return (cpu {registers = regs'}, 1)
     LD_A_AtR16mem src -> do
       let addr = readR16Mem regs src
       val <- readByte addr bus
       regs' <- writeR8 regs bus A val
       return (cpu {registers = updateR16MemHL src regs'}, 1)
+    LD_HL_SP_plus_imm8 i -> do
+      let (res, c, h) = addSignedToSP (readR16 regs SP) i
+          regs' =
+            writeR16 regs HL res
+              & setZflag False
+              & setNflag False
+              & setHflag h
+              & setCflag c
+      return (cpu {registers = regs'}, 1)
+    LD_SP_HL -> return (cpu {registers = writeR16 regs SP (readR16 regs HL)}, 1)
     CALL_addr16 SubOpCallWait addr ->
       return (cpu {currentInstruction=Just (CALL_addr16 SubOpCallPushHigh addr)}, 1)
     CALL_addr16 SubOpCallPushHigh addr -> do
@@ -391,6 +725,10 @@ executeInstruction cpu op = do
     CALL_addr16 SubOpCallJmp addr -> do
       cpu' <- push8Low cpu.registers.rPC cpu
       return (cpu'{registers=cpu'.registers{rPC=addr}}, 1)
+    CALL_cond_imm16 cond addr ->
+      if condSatisfied cond regs
+        then return (cpu {currentInstruction=Just (CALL_addr16 SubOpCallPushHigh addr)}, 1)
+        else return (cpu, 0)
     RET SubOpPopLow -> do
       (cpu', low) <- pop8 cpu
       return (cpu'{currentInstruction=Just (RET $ SubOpPopHigh low)}, 1)
@@ -438,6 +776,22 @@ executeInstruction cpu op = do
           A
           val'
       return (cpu {registers = regs'}, 0)
+    RLCA -> do
+      val <- readR8 regs bus A
+      let newc = (val .&. 0x80) /= 0
+          val' = val .<<. 1 .|. (val .>>. 7)
+      regs' <-
+        writeR8
+          ( regs
+              & setZflag False
+              & setNflag False
+              & setHflag False
+              & setCflag newc
+          )
+          bus
+          A
+          val'
+      return (cpu {registers = regs'}, 0)
     EI -> return (cpu {ime = case cpu.ime of
                                 Disabled -> EnableAfterNextInstruction
                                 EnableAfterNextInstruction -> EnableAfterNextInstruction
@@ -455,5 +809,120 @@ executeInstruction cpu op = do
     JP_imm16 addr ->
       return (cpu{registers = cpu.registers {rPC = addr}}, 1)
     JP_HL -> return (cpu {registers = cpu.registers {rPC = readR16 regs HL}}, 0)
+    JP_cond_imm16 cond addr ->
+      if condSatisfied cond regs
+        then return (cpu{registers = cpu.registers {rPC = addr}}, 1)
+        else return (cpu, 0)
     STOP -> return (cpu, 0)
-    _ -> todo $ "execute instruction op " ++ show op
+    CPL -> return
+        ( cpu
+            { registers =
+                regs
+                  & modifyR8 A complement
+                  & setNflag True
+                  & setHflag True
+            },
+          0
+        )
+    RST SubOpPushWait val -> return (cpu {currentInstruction=Just (RST SubOpPushHigh val)}, 1)
+    RST SubOpPushHigh val -> do
+      cpu' <- push8High cpu.registers.rPC cpu
+      return (cpu'{currentInstruction=Just (RST SubOpPushLow val)}, 1)
+    RST SubOpPushLow val -> do
+      cpu' <- push8Low cpu.registers.rPC cpu
+      return (cpu'{registers=cpu'.registers{rPC=val}}, 1)
+    ADD_SP_imm8 i -> do
+      let (res, c, h) = addSignedToSP (readR16 regs SP) i
+          regs' =
+            writeR16 regs SP res
+              & setZflag False
+              & setNflag False
+              & setHflag h
+              & setCflag c
+      return (cpu {registers = regs'}, 2)
+    ADD_HL_r16 r16 -> do
+      let hl = readR16 regs HL
+          val = readR16 regs r16
+          res = hl + val
+          h = ((hl .&. 0x0FFF) + (val .&. 0x0FFF)) > 0x0FFF
+          c = ((fromIntegral hl :: Int) + (fromIntegral val :: Int)) > 0xFFFF
+          regs' =
+            writeR16 regs HL res
+              & setNflag False
+              & setHflag h
+              & setCflag c
+      return (cpu {registers = regs'}, 1)
+    DAA -> do
+      val <- readR8 regs bus A
+      let subtracting = nflag regs
+          carry = cflag regs || (not subtracting && val > 0x99)
+          lowAdjust = if hflag regs || (not subtracting && (val .&. 0x0F) > 9)
+                        then 0x06 else 0
+          highAdjust = if carry then 0x60 else 0
+          adjust = lowAdjust + highAdjust
+          res = if subtracting then val - adjust else val + adjust
+      regs' <-
+        writeR8
+          ( regs
+              & setZflag (res == 0)
+              & setHflag False
+              & setCflag carry
+          )
+          bus
+          A
+          res
+      return (cpu {registers = regs'}, 0)
+    CCF -> return
+        ( cpu
+            { registers =
+                regs
+                  & setNflag False
+                  & setHflag False
+                  & setCflag (not (cflag regs))
+            },
+          0
+        )
+    INVALID _ -> return (cpu {currentInstruction=Just op}, 0)
+    RRCA -> do
+      val <- readR8 regs bus A
+      let newc = (val .&. 0x01) /= 0
+          val' = val .>>. 1 .|. (val .<<. 7)
+      regs' <-
+        writeR8
+          ( regs
+              & setZflag False
+              & setNflag False
+              & setHflag False
+              & setCflag newc
+          )
+          bus
+          A
+          val'
+      return (cpu {registers = regs'}, 0)
+    SCF -> return
+        ( cpu
+            { registers =
+                regs
+                  & setNflag False
+                  & setHflag False
+                  & setCflag True
+            },
+          0
+        )
+    RRA -> do
+      val <- readR8 regs bus A
+      let c = cflag regs
+          newc = (val .&. 0x01) /= 0
+          val' = val .>>. 1 .|. (if c then 0x80 else 0)
+      regs' <-
+        writeR8
+          ( regs
+              & setZflag False
+              & setNflag False
+              & setHflag False
+              & setCflag newc
+          )
+          bus
+          A
+          val'
+      return (cpu {registers = regs'}, 0)

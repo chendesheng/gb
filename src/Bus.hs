@@ -56,6 +56,7 @@ module Bus
     JoypadKey(..),
     resetDIV,
     increaseTimer,
+    executeDMACopy,
   )
 where
 
@@ -99,10 +100,13 @@ data Bus = Bus
     ie :: IORef Word8,
     joypad :: IORef Word8,
     systemCounter :: IORef Word16,
-    timaOverflow :: IORef TIMAOverflow
+    timaOverflow :: IORef TIMAOverflow,
+    dma :: IORef DMA
   }
 
 data TIMAOverflow = NoTIMAOverflow | TIMAOverflowDelay | TIMAOverflowReloading
+
+data DMA = NoDMA | DMAStart | DMACopying Word8
 
 initBus :: BL.ByteString -> BL.ByteString -> IO Bus
 initBus boot cartridge = do
@@ -116,6 +120,7 @@ initBus boot cartridge = do
   joypad <- newIORef 0xFF
   systemCounter <- newIORef 0
   timaOverflow <- newIORef NoTIMAOverflow
+  dma <- newIORef NoDMA
   return
     Bus
       { boot = byteStringToVector boot,
@@ -128,7 +133,8 @@ initBus boot cartridge = do
         ie,
         joypad,
         systemCounter,
-        timaOverflow
+        timaOverflow,
+        dma
       }
 
 readByte0xFF50 :: Bus -> IO Word8
@@ -140,7 +146,19 @@ bootRomEnabled bus = do
   return $ b == 0
 
 readByte :: Address -> Bus -> IO Word8
-readByte addr bus
+readByte addr bus = do
+  dma <- readIORef bus.dma
+  case dma of
+    NoDMA -> readByteRaw addr bus
+    DMAStart -> readByteRaw addr bus
+    DMACopying _ ->
+      if 0x0FF80 <= addr && addr <= 0xFFFE then
+        readByteRaw addr bus
+      else
+        return 0xFF
+
+readByteRaw :: Word16 -> Bus -> IO Word8
+readByteRaw addr bus
   | addr < 0x0100 = do
       enabled <- bootRomEnabled bus
       return $ readRom addr (if enabled then bus.boot else bus.cartridge)
@@ -191,85 +209,97 @@ readBytes addr n bus
       return $ b : bs
 
 writeByte :: Address -> Word8 -> Bus -> IO ()
-writeByte addr val bus
-  -- addr < 0x8000  Usually cartridge/MBC control
-  | 0x8000 <= addr && addr < 0xA000 = do
-      -- VRAM is inaccessible in mode 3
-      mode <- readPPUMode bus.io
-      if mode == 3 then
-        return ()
-      else do
-        writeRam (addr - 0x8000) val bus.vram
-  | 0xC000 <= addr && addr < 0xE000 = do
-      writeRam (addr - 0xC000) val bus.wram
-  | 0xFE00 <= addr && addr < 0xFEA0 = do
-      mode <- readPPUMode bus.io
-      if mode == 2 || mode == 3 then
-        return ()
-      else do
-        writeRam (addr - 0xFE00) val bus.oam
-  | 0xFF00 == addr = do
-    oldJoyp <- readJOYP bus
-    writeRam 0 val bus.io
-    joyp <- readJOYP bus
-    requestJoypadInt oldJoyp joyp bus
-  | 0xFF04 == addr = resetDIV bus
-  | 0xFF05 == addr = do
-    overflow <- readIORef bus.timaOverflow
-    case overflow of
-      NoTIMAOverflow ->
-        writeRam 5 val bus.io
-      TIMAOverflowDelay -> do
-        writeRam 5 val bus.io
-        clearTIMAOverflow bus
-      TIMAOverflowReloading ->
-        return ()
-  | 0xFF06 == addr = do
-    writeRam 6 val bus.io
-    overflow <- readIORef bus.timaOverflow
-    case overflow of
-      TIMAOverflowReloading -> writeRam 5 val bus.io
-      _ -> return ()
-  | 0xFF07 == addr = do
-    detectFallingEdge (\bus' -> writeRam 7 val bus'.io) bus
-  | 0xFF40 == addr = do
-      updateSTATInterrupt bus $ do
-        wasOn <- isLcdOn bus
-        writeRam 0x40 val bus.io
-        if not (val `testBit` 7) then
-          syncPPURegisters 0 0 bus
-        else
-          unless wasOn $ syncPPURegisters 0 2 bus
-  | 0xFF41 == addr = do
-      updateSTATInterrupt bus $ do
-        -- the lower 3 bits are readonly
-        -- FIXME: what about the highest bit?
-        b <- readRam 0x41 bus.io
-        let b' = b .&. 0x07 -- b00000111
-        let val' = val .&. 0xF8 -- b11111000
-        writeRam 0x41 (val' .|. b') bus.io
-      return ()
-  | 0xFF44 == addr = return () -- LY is readonly
-  | 0xFF45 == addr = do -- LY compare
-      updateSTATInterrupt bus $ do
-        ly <- readLcdY bus
-        status <- readRam 0x41 bus.io
-        writeRam 0x45 val bus.io
-        if ly == val then do
-          writeRam 0x41 (status `setBit` 2) bus.io
-        else
-          writeRam 0x41 (status `clearBit` 2) bus.io
-  | 0xFF50 == addr = do
-      -- 0xFF50 disables boot ROM
-      b <- readByte0xFF50 bus
-      writeRam 0x50 (val .|. b) bus.io
-  | 0xFF00 < addr && addr < 0xFF80 = do
-      writeRam (addr - 0xFF00) val bus.io
-  | 0xFF80 <= addr && addr < 0xFFFF = do
-      writeRam (addr - 0xFF80) val bus.hram
-  | addr == 0xFFFF = do
-      writeIORef bus.ie val
-  | otherwise = return ()
+writeByte addr val bus = do
+  dma <- readIORef bus.dma
+  case dma of
+    NoDMA -> writeByteRaw addr val bus
+    DMAStart -> writeByteRaw addr val bus
+    DMACopying _ -> when (addr == 0xFF46 ||
+                          (0x0FF80 <= addr && addr <= 0xFFFE)) $ writeByteRaw addr val bus
+
+writeByteRaw :: Address -> Word8 -> Bus -> IO ()
+writeByteRaw addr val bus
+      -- addr < 0x8000  Usually cartridge/MBC control
+      | 0x8000 <= addr && addr < 0xA000 = do
+          -- VRAM is inaccessible in mode 3
+          mode <- readPPUMode bus.io
+          if mode == 3 then
+            return ()
+          else do
+            writeRam (addr - 0x8000) val bus.vram
+      | 0xC000 <= addr && addr < 0xE000 = do
+          writeRam (addr - 0xC000) val bus.wram
+      | 0xFE00 <= addr && addr < 0xFEA0 = do
+          mode <- readPPUMode bus.io
+          if mode == 2 || mode == 3 then
+            return ()
+          else do
+            writeRam (addr - 0xFE00) val bus.oam
+      | 0xFF00 == addr = do
+        oldJoyp <- readJOYP bus
+        writeRam 0 val bus.io
+        joyp <- readJOYP bus
+        requestJoypadInt oldJoyp joyp bus
+      | 0xFF04 == addr = resetDIV bus
+      | 0xFF05 == addr = do
+        overflow <- readIORef bus.timaOverflow
+        case overflow of
+          NoTIMAOverflow ->
+            writeRam 5 val bus.io
+          TIMAOverflowDelay -> do
+            writeRam 5 val bus.io
+            clearTIMAOverflow bus
+          TIMAOverflowReloading ->
+            return ()
+      | 0xFF06 == addr = do
+        writeRam 6 val bus.io
+        overflow <- readIORef bus.timaOverflow
+        case overflow of
+          TIMAOverflowReloading -> writeRam 5 val bus.io
+          _ -> return ()
+      | 0xFF07 == addr = do
+        detectFallingEdge (\bus' -> writeRam 7 val bus'.io) bus
+      | 0xFF40 == addr = do
+          updateSTATInterrupt bus $ do
+            wasOn <- isLcdOn bus
+            writeRam 0x40 val bus.io
+            if not (val `testBit` 7) then
+              syncPPURegisters 0 0 bus
+            else
+              unless wasOn $ syncPPURegisters 0 2 bus
+      | 0xFF41 == addr = do
+          updateSTATInterrupt bus $ do
+            -- the lower 3 bits are readonly
+            -- FIXME: what about the highest bit?
+            b <- readRam 0x41 bus.io
+            let b' = b .&. 0x07 -- b00000111
+            let val' = val .&. 0xF8 -- b11111000
+            writeRam 0x41 (val' .|. b') bus.io
+          return ()
+      | 0xFF44 == addr = return () -- LY is readonly
+      | 0xFF45 == addr = do -- LY compare
+          updateSTATInterrupt bus $ do
+            ly <- readLcdY bus
+            status <- readRam 0x41 bus.io
+            writeRam 0x45 val bus.io
+            if ly == val then do
+              writeRam 0x41 (status `setBit` 2) bus.io
+            else
+              writeRam 0x41 (status `clearBit` 2) bus.io
+      | 0xFF46 == addr = do
+        writeRam 0x46 val bus.io
+        writeIORef bus.dma DMAStart
+      | 0xFF50 == addr = do
+          -- 0xFF50 disables boot ROM
+          b <- readByte0xFF50 bus
+          writeRam 0x50 (val .|. b) bus.io
+      | 0xFF00 < addr && addr < 0xFF80 = do
+          writeRam (addr - 0xFF00) val bus.io
+      | 0xFF80 <= addr && addr < 0xFFFF = do
+          writeRam (addr - 0xFF80) val bus.hram
+      | addr == 0xFFFF = do
+          writeIORef bus.ie val
+      | otherwise = return ()
 
 readPPUMode :: Ram -> IO Word8
 readPPUMode io = do
@@ -342,7 +372,7 @@ readVRam addr bus =
 -- https://gbdev.io/pandocs/LCDC.html
 readLcdC :: Int -> Bus -> IO Bool
 readLcdC index bus = do
-  b <- readByte 0xFF40 bus
+  b <- readRam 0x40 bus.io
   return $ (b .>>. index .&. 0x01) == 1
 
 isLcdOn :: Bus -> IO Bool
@@ -378,10 +408,10 @@ isLcdCBgEnable :: Bus -> IO Bool
 isLcdCBgEnable = readLcdC 0
 
 readLcdY :: Bus -> IO Word8
-readLcdY = readByte 0xFF44
+readLcdY bus = readRam 0x44 bus.io
 
 readLcdYC :: Bus -> IO Word8
-readLcdYC = readByte 0xFF45
+readLcdYC bus = readRam 0x45 bus.io
 
 -- writeLcdYC :: Word8 -> Bus -> IO Bus
 -- writeLcdYC = writeByte 0xFF45
@@ -404,32 +434,32 @@ readMode0IntSelect :: Bus -> IO Bool
 readMode0IntSelect = readLcdStatus 3
 
 readSCY :: Bus -> IO Word8
-readSCY = readByte 0xFF42
+readSCY bus = readRam 0x42 bus.io
 
 readSCX :: Bus -> IO Word8
-readSCX = readByte 0xFF43
+readSCX bus = readRam 0x43 bus.io
 
 readSCXInt :: Bus -> IO Int
 readSCXInt bus = fromIntegral <$> readSCX bus
 
 readBGPalette :: Bus -> IO ColorPalette
-readBGPalette = readByte 0xFF47
+readBGPalette bus = readRam 0x47 bus.io
 
 readOBP0Palette :: Bus -> IO ColorPalette
-readOBP0Palette = readByte 0xFF48
+readOBP0Palette bus = readRam 0x48 bus.io
 
 readOBP1Palette :: Bus -> IO ColorPalette
-readOBP1Palette = readByte 0xFF49
+readOBP1Palette bus = readRam 0x49 bus.io
 
 readObjPalette :: Bool -> Bus -> IO ColorPalette
 readObjPalette False = readOBP0Palette
 readObjPalette True = readOBP1Palette
 
 readWY :: Bus -> IO Word8
-readWY = readByte 0xFF4A
+readWY bus = readRam 0x4A bus.io
 
 readWX :: Bus -> IO Word8
-readWX = readByte 0xFF4B
+readWX bus = readRam 0x4B bus.io
 
 readWXInt :: Bus -> IO Int
 readWXInt bus = fromIntegral <$> readWX bus
@@ -537,29 +567,29 @@ filterInterrupts f bus = filterM (\int -> do
                                 ) [VBlank .. JoypadInt]
 
 readIE :: Bus -> IO Interrupts
-readIE = filterInterrupts $ readByte 0xFFFF
+readIE bus = filterInterrupts (\_ -> readIORef bus.ie) bus
 
 writeIE :: Interrupt -> Bool -> Bus -> IO ()
 writeIE int val bus = do
-  b <- readByte 0xFFFF bus
+  b <- readIORef bus.ie
   let bit = fromEnum int
   let update = if val then setBit else clearBit
-  writeByte 0xFFFF (b `update` bit) bus
+  writeIORef bus.ie (b `update` bit)
   return ()
 
 readIF :: Bus -> IO Interrupts
-readIF = filterInterrupts $ readByte 0xFF0F
+readIF bus = filterInterrupts (\_ -> readRam 0x0F bus.io) bus
 
 writeIF :: Interrupt -> Bool -> Bus -> IO ()
 writeIF int val bus = do
-  b <- readByte 0xFF0F bus
+  b <- readRam 0x0F bus.io
   let bit = fromEnum int
   let update = if val then setBit else clearBit
-  writeByte 0xFF0F (b `update` bit) bus
+  writeRam 0x0F (b `update` bit) bus.io
   return ()
 
 readJOYP :: Bus -> IO Word8
-readJOYP = readByte 0xFF00
+readJOYP bus = readRam 0 bus.io
 
 data JoypadKey = AKey | BKey | SelectKey | StartKey | RightKey | LeftKey | UpKey | DownKey deriving (Show, Eq, Enum)
 
@@ -639,3 +669,21 @@ detectFallingEdge f bus = do
         newSignal = timerSignal tac counter
     when (oldSignal && not newSignal) $ increaseTIMA bus
     return res
+
+executeDMACopy :: Word8 -> Bus -> IO ()
+executeDMACopy 0 _ = return ()
+executeDMACopy times bus = do
+  dma <- readIORef bus.dma
+  case dma of
+    NoDMA -> return ()
+    DMAStart -> do
+      writeIORef bus.dma $ DMACopying 0
+      executeDMACopy (times - 1) bus
+    DMACopying n -> do
+      -- copy one Word8
+      sourcePage <- readRam 0x46 bus.io
+      let sourceAddress = ((fromIntegral sourcePage :: Word16) * 0x100) + fromIntegral n
+      source <- readByteRaw sourceAddress bus
+      writeRam (fromIntegral n) source bus.oam
+      writeIORef bus.dma $ if n == 0x9F then NoDMA else DMACopying (n + 1)
+      executeDMACopy (times - 1) bus

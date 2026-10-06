@@ -54,6 +54,8 @@ module Bus
     readObjPalette,
     setJoypad,
     JoypadKey(..),
+    resetDIV,
+    increaseTimer,
   )
 where
 
@@ -63,7 +65,7 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Vector.Unboxed (Vector, (!))
 import qualified Data.Vector.Unboxed as V
 import qualified Data.Vector.Unboxed.Mutable as MV
-import Data.IORef (IORef, newIORef, readIORef, writeIORef, modifyIORef')
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Word
 import Instruction (Instruction, instructionDecoder)
 import Registers
@@ -95,8 +97,12 @@ data Bus = Bus
     io :: Ram,
     hram :: Ram,
     ie :: IORef Word8,
-    joypad :: IORef Word8
+    joypad :: IORef Word8,
+    systemCounter :: IORef Word16,
+    timaOverflow :: IORef TIMAOverflow
   }
+
+data TIMAOverflow = NoTIMAOverflow | TIMAOverflowDelay | TIMAOverflowReloading
 
 initBus :: BL.ByteString -> BL.ByteString -> IO Bus
 initBus boot cartridge = do
@@ -108,6 +114,8 @@ initBus boot cartridge = do
   hram <- MV.replicate 0x007F 0xCD -- FF80-FFFE
   ie  <- newIORef 0x00
   joypad <- newIORef 0xFF
+  systemCounter <- newIORef 0
+  timaOverflow <- newIORef NoTIMAOverflow
   return
     Bus
       { boot = byteStringToVector boot,
@@ -118,7 +126,9 @@ initBus boot cartridge = do
         hram,
         io,
         ie,
-        joypad
+        joypad,
+        systemCounter,
+        timaOverflow
       }
 
 readByte0xFF50 :: Bus -> IO Word8
@@ -159,6 +169,12 @@ readByte addr bus
                     joypad <- readIORef bus.joypad
                     return $ joypad .&. 0x0F
       return $ 0xC0 .|. (0x30 .&. selection) .|. (directions .&. buttons)
+  | 0xFF04 == addr = do
+    counter <- readIORef bus.systemCounter
+    return $ fromIntegral $ counter .>>. 6
+  | 0xFF07 == addr = do
+    val <- readRam 7 bus.io
+    return $ val .|. 0xF8
   | 0xFF00 < addr && addr < 0xFF80 =
       readRam (addr - 0xFF00) bus.io
   | 0xFF80 <= addr && addr < 0xFFFF =
@@ -192,6 +208,30 @@ writeByte addr val bus
         return ()
       else do
         writeRam (addr - 0xFE00) val bus.oam
+  | 0xFF00 == addr = do
+    oldJoyp <- readJOYP bus
+    writeRam 0 val bus.io
+    joyp <- readJOYP bus
+    requestJoypadInt oldJoyp joyp bus
+  | 0xFF04 == addr = resetDIV bus
+  | 0xFF05 == addr = do
+    overflow <- readIORef bus.timaOverflow
+    case overflow of
+      NoTIMAOverflow ->
+        writeRam 5 val bus.io
+      TIMAOverflowDelay -> do
+        writeRam 5 val bus.io
+        clearTIMAOverflow bus
+      TIMAOverflowReloading ->
+        return ()
+  | 0xFF06 == addr = do
+    writeRam 6 val bus.io
+    overflow <- readIORef bus.timaOverflow
+    case overflow of
+      TIMAOverflowReloading -> writeRam 5 val bus.io
+      _ -> return ()
+  | 0xFF07 == addr = do
+    detectFallingEdge (\bus' -> writeRam 7 val bus'.io) bus
   | 0xFF40 == addr = do
       updateSTATInterrupt bus $ do
         wasOn <- isLcdOn bus
@@ -223,11 +263,6 @@ writeByte addr val bus
       -- 0xFF50 disables boot ROM
       b <- readByte0xFF50 bus
       writeRam 0x50 (val .|. b) bus.io
-  | 0xFF00 == addr = do
-    oldJoyp <- readJOYP bus
-    writeRam 0 val bus.io
-    joyp <- readJOYP bus
-    requestJoypadInt oldJoyp joyp bus
   | 0xFF00 < addr && addr < 0xFF80 = do
       writeRam (addr - 0xFF00) val bus.io
   | 0xFF80 <= addr && addr < 0xFFFF = do
@@ -477,12 +512,12 @@ readBgTileRowBaseAddress index y bus = do
     rowOffset = fromIntegral (y `mod` 8) * 2
 
 -- Interruption
-data Interrupt = VBlank | LCDStat | Timer | Serial | JoypadInt  deriving (Show, Eq, Enum)
+data Interrupt = VBlank | LCDStat | TimerInt | Serial | JoypadInt  deriving (Show, Eq, Enum)
 
 interruptAddress :: Interrupt -> Address
 interruptAddress VBlank = 0x40
 interruptAddress LCDStat = 0x48
-interruptAddress Timer = 0x50
+interruptAddress TimerInt = 0x50
 interruptAddress Serial = 0x58
 interruptAddress JoypadInt = 0x60
 
@@ -540,3 +575,67 @@ setJoypad key b bus = do
                           else setBit oldVal (fromEnum key)
   joyp <- readJOYP bus
   requestJoypadInt oldJoyp joyp bus
+
+resetDIV :: Bus -> IO ()
+resetDIV = detectFallingEdge (\bus -> writeIORef bus.systemCounter 0)
+
+increaseTIMA :: Bus -> IO ()
+increaseTIMA bus = do
+  tima <- readRam 5 bus.io
+  let tima' = tima + 1
+  writeRam 5 tima' bus.io
+  when (tima' == 0) $ writeIORef bus.timaOverflow TIMAOverflowDelay
+
+triggerTimaOverflow :: Bus -> IO ()
+triggerTimaOverflow bus = do
+    timaOverflow <- readIORef bus.timaOverflow
+    case timaOverflow of
+      NoTIMAOverflow -> return ()
+      TIMAOverflowDelay -> do
+        tma <- readTMA bus
+        writeRam 5 tma bus.io
+        writeIORef bus.timaOverflow TIMAOverflowReloading
+        writeIF TimerInt True bus
+      TIMAOverflowReloading ->
+        clearTIMAOverflow bus
+
+readTMA :: Bus -> IO Word8
+readTMA bus = readRam 6 bus.io
+
+readTAC :: Bus -> IO Word8
+readTAC bus = readRam 7 bus.io
+
+increaseTimer :: Word8 -> Bus -> IO ()
+increaseTimer 0 _ = return ()
+increaseTimer n bus = do
+  triggerTimaOverflow bus
+
+  detectFallingEdge (\bus' -> do
+    counter <- readIORef bus'.systemCounter
+    writeIORef bus'.systemCounter $ counter + 1) bus
+
+  increaseTimer (n - 1) bus
+
+clearTIMAOverflow :: Bus -> IO ()
+clearTIMAOverflow bus = writeIORef bus.timaOverflow NoTIMAOverflow
+
+timerSignal :: Word8 -> Word16 -> Bool
+timerSignal tac counter =
+  let selectedBit = case tac .&. 0x03 of
+        0 -> 7
+        1 -> 1
+        2 -> 3
+        _ -> 5
+  in testBit tac 2 && testBit counter selectedBit
+
+detectFallingEdge :: (Bus -> IO a) -> Bus -> IO a
+detectFallingEdge f bus = do
+    oldCounter <- readIORef bus.systemCounter
+    oldTac <- readTAC bus
+    res <- f bus
+    counter <- readIORef bus.systemCounter
+    tac <- readTAC bus
+    let oldSignal = timerSignal oldTac oldCounter
+        newSignal = timerSignal tac counter
+    when (oldSignal && not newSignal) $ increaseTIMA bus
+    return res

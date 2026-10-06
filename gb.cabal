@@ -70,7 +70,7 @@ common warnings
 common shared
     -- Base language which the package is written in.
     default-language: Haskell2010
-    default-extensions:  OverloadedStrings, OverloadedRecordDot, DuplicateRecordFields, NamedFieldPuns
+    default-extensions:  OverloadedStrings, OverloadedRecordDot, DuplicateRecordFields, NamedFieldPuns, BinaryLiterals
 
 library gb-lib
     -- Import common warning flags.

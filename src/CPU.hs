@@ -17,8 +17,10 @@ import Bus
     readIF,
     readIE,
     writeIF,
+    resetDIV,
     Interrupts,
     interruptAddress,
+    increaseTimer,
   )
 import Data.Bits ((.<<.), xor, (.>>.), (.&.), (.|.), complement)
 import Data.Function ((&))
@@ -29,7 +31,12 @@ import Dbg
 import Instruction
 import Registers
 
-data CPU = CPU {registers :: Registers, bus :: Bus, ime :: InterruptStep, currentInstruction :: Maybe OpCode}
+data CPU = CPU
+  { registers :: Registers
+  , bus :: Bus
+  , ime :: InterruptStep
+  , currentInstruction :: Maybe OpCode
+  }
 
 data InterruptStep
   = Disabled
@@ -60,29 +67,38 @@ addWithCarry a b carry =
       halfCarry = ((a .&. 0x0F) + (b .&. 0x0F) + fromIntegral carryIn) > 0x0F
    in (result, carryOut, halfCarry)
 
+-- TODO: make timer accurate, need split to per M-cycle
 execute :: CPU -> IO (CPU, Word8)
 execute cpu = do
-  case cpu.currentInstruction of
-      Nothing -> do
-        (cpu, elapsed) <- executeInterruption cpu
-        if elapsed > 0 then
-          return (cpu, elapsed)
-        else do
-            ins <- fetchInstruction cpu.registers.rPC cpu.bus
-            return (cpu { currentInstruction = Just ins.op
-                        , registers = advancePC (fromIntegral ins.len) cpu.registers
-                        }
-                  , ins.len * 4
-                  )
-      Just HALT -> do
-        ie <- readIE cpu.bus
-        if_ <- readIF cpu.bus
-        if null (ie `intersect` if_)
-          then return (cpu, 4)
-          else execute cpu{currentInstruction = Nothing}
-      Just op -> do
-        (cpu', elapsed) <- executeInstruction cpu{currentInstruction=Nothing} op
-        return (cpu', elapsed)
+  (cpu1, cycles) <- go cpu
+  if cycles > 0 then do
+    increaseTimer cycles cpu1.bus
+    return (cpu1, cycles)
+  else
+    return (cpu1, cycles)
+  where
+    go cpu =
+      case cpu.currentInstruction of
+          Nothing -> do
+            (cpu, elapsed) <- executeInterruption cpu
+            if elapsed > 0 then
+              return (cpu, elapsed)
+            else do
+                ins <- fetchInstruction cpu.registers.rPC cpu.bus
+                return (cpu { currentInstruction = Just ins.op
+                            , registers = advancePC (fromIntegral ins.len) cpu.registers
+                            }
+                      , ins.len
+                      )
+          Just HALT -> do
+            ie <- readIE cpu.bus
+            if_ <- readIF cpu.bus
+            if null (ie `intersect` if_)
+              then return (cpu, 1)
+              else go cpu{currentInstruction = Nothing}
+          Just op -> do
+            (cpu', elapsed) <- executeInstruction cpu{currentInstruction=Nothing} op
+            return (cpu', elapsed)
 
 executeInterruption :: CPU -> IO (CPU, Word8)
 executeInterruption cpu = do
@@ -92,22 +108,22 @@ executeInterruption cpu = do
       ie <- readIE cpu.bus
       if_ <- readIF cpu.bus
       return $ if null $ ie `intersect` if_ then (cpu, 0)
-               else (cpu{ime=Enabled IntSrvWriteSPHigh, currentInstruction=Nothing}, 8)
+               else (cpu{ime=Enabled IntSrvWriteSPHigh, currentInstruction=Nothing}, 2)
     Enabled IntSrvWriteSPHigh -> do
       let addr = cpu.registers.rPC
       cpu' <- push8High addr cpu
-      return (cpu'{ime=Enabled IntSrvWriteSPLow}, 4)
+      return (cpu'{ime=Enabled IntSrvWriteSPLow}, 1)
     Enabled IntSrvWriteSPLow -> do
       ie <- readIE cpu.bus
       cpu' <- push8Low cpu.registers.rPC cpu
-      return (cpu'{ime=Enabled $ IntSrvJmp ie }, 4)
+      return (cpu'{ime=Enabled $ IntSrvJmp ie }, 1)
     Enabled (IntSrvJmp ie) -> do
       if_ <- readIF cpu.bus
       case ie `intersect` if_ of
         (int:_) -> do
           writeIF int False cpu.bus
-          return (cpu{ime=Disabled, registers=cpu.registers{rPC=interruptAddress int}}, 4)
-        _ -> return (cpu{ime=Disabled, registers=cpu.registers{rPC=0}}, 4)
+          return (cpu{ime=Disabled, registers=cpu.registers{rPC=interruptAddress int}}, 1)
+        _ -> return (cpu{ime=Disabled, registers=cpu.registers{rPC=0}}, 1)
     Disabled -> return (cpu, 0)
 
 condSatisfied :: Cond -> Registers -> Bool
@@ -142,7 +158,7 @@ pop8 cpu = do
   return (cpu {registers = regs {rSP = sp + 1}}, val)
 
 memoryCycles :: R8 -> Word8
-memoryCycles AtHL = 4
+memoryCycles AtHL = 1
 memoryCycles _ = 0
 
 highByte :: Word16 -> Word8
@@ -250,28 +266,28 @@ executeInstruction cpu op = do
       return (cpu {registers = writeR16 regs r16 val}, 0)
     LDH_AtImm8_A offset -> do
       writeByteHighMemory offset regs.rA bus
-      return (cpu, 4)
+      return (cpu, 1)
     LD_AtR16mem_A dst ->
       let srcAddr = readR16Mem regs dst
        in do
             val <- readR8 regs bus A
             writeByte srcAddr val bus
-            return (cpu {registers = updateR16MemHL dst regs}, 4)
+            return (cpu {registers = updateR16MemHL dst regs}, 1)
     LD_Addr16_A addr -> do
       a <- readR8 regs bus A
       writeByte addr a bus
-      return (cpu, 4)
+      return (cpu, 1)
     LDH_A_AtImm8 addr8 -> do
       val <- readByteHighMemory addr8 bus
       regs' <- writeR8 regs bus A val
-      return (cpu {registers = regs'}, 4)
+      return (cpu {registers = regs'}, 1)
     JR_imm8 offset ->
-      return (cpu {registers = advancePC offset cpu.registers}, 4)
+      return (cpu {registers = advancePC offset cpu.registers}, 1)
     JR_cond_imm8 cond offset ->
       return $
         if condSatisfied cond regs
           then
-            (cpu {registers = advancePC offset regs}, 4)
+            (cpu {registers = advancePC offset regs}, 1)
           else (cpu, 0)
     PREFIX_CB (BIT  b3 r8) -> do
       val <- readR8 regs bus r8
@@ -321,7 +337,7 @@ executeInstruction cpu op = do
       return (cpu {registers = regs1}, memoryCycles r8)
     LDH_AtC_A -> do
       writeByteHighMemory regs.rC regs.rA bus
-      return (cpu, 4)
+      return (cpu, 1)
     INC_r8 SubOpRead r8 -> do
       val <- readR8 regs bus r8
       return (cpu{currentInstruction=Just (INC_r8 (SubOpWrite val) r8)}, memoryCycles r8)
@@ -341,7 +357,7 @@ executeInstruction cpu op = do
     INC_r16 r16 -> do
       let val = readR16 regs r16
           regs' = writeR16 regs r16 $ val + 1
-      return (cpu {registers = regs'}, 4)
+      return (cpu {registers = regs'}, 1)
     DEC_r8 SubOpRead r8 -> do
       val <- readR8 regs bus r8
       return (cpu{currentInstruction=Just (DEC_r8 (SubOpWrite val) r8)}, memoryCycles r8)
@@ -361,50 +377,50 @@ executeInstruction cpu op = do
     DEC_r16 BC -> do
       let val = readR16 regs BC
           regs' = writeR16 regs BC $ val - 1
-      return (cpu {registers = regs'}, 4)
+      return (cpu {registers = regs'}, 1)
     LD_A_AtR16mem src -> do
       let addr = readR16Mem regs src
       val <- readByte addr bus
       regs' <- writeR8 regs bus A val
-      return (cpu {registers = updateR16MemHL src regs'}, 4)
+      return (cpu {registers = updateR16MemHL src regs'}, 1)
     CALL_addr16 SubOpCallWait addr ->
-      return (cpu {currentInstruction=Just (CALL_addr16 SubOpCallPushHigh addr)}, 4)
+      return (cpu {currentInstruction=Just (CALL_addr16 SubOpCallPushHigh addr)}, 1)
     CALL_addr16 SubOpCallPushHigh addr -> do
       cpu' <- push8High cpu.registers.rPC cpu
-      return (cpu'{currentInstruction=Just (CALL_addr16 SubOpCallJmp addr)}, 4)
+      return (cpu'{currentInstruction=Just (CALL_addr16 SubOpCallJmp addr)}, 1)
     CALL_addr16 SubOpCallJmp addr -> do
       cpu' <- push8Low cpu.registers.rPC cpu
-      return (cpu'{registers=cpu'.registers{rPC=addr}}, 4)
+      return (cpu'{registers=cpu'.registers{rPC=addr}}, 1)
     RET SubOpPopLow -> do
       (cpu', low) <- pop8 cpu
-      return (cpu'{currentInstruction=Just (RET $ SubOpPopHigh low)}, 4)
+      return (cpu'{currentInstruction=Just (RET $ SubOpPopHigh low)}, 1)
     RET (SubOpPopHigh low) -> do
       (cpu', high) <- pop8 cpu
       let pc = toWord16 low high
-      return (cpu{registers = cpu'.registers {rPC = pc}}, 8)
+      return (cpu{registers = cpu'.registers {rPC = pc}}, 2)
     RET_cond cond -> do
       if condSatisfied cond regs
-      then return (cpu{currentInstruction=Just (RET SubOpPopLow)}, 4)
-      else return (cpu, 4)
+      then return (cpu{currentInstruction=Just (RET SubOpPopLow)}, 1)
+      else return (cpu, 1)
     PUSH SubOpPushWait stk -> do
-      return (cpu{currentInstruction=Just (PUSH SubOpPushHigh stk)}, 4)
+      return (cpu{currentInstruction=Just (PUSH SubOpPushHigh stk)}, 1)
     PUSH SubOpPushHigh stk -> do
       let val = getR16Stk stk regs
       cpu' <- push8High val cpu
-      return (cpu'{currentInstruction=Just (PUSH SubOpPushLow stk)}, 4)
+      return (cpu'{currentInstruction=Just (PUSH SubOpPushLow stk)}, 1)
     PUSH SubOpPushLow stk -> do
       let val = getR16Stk stk regs
       cpu' <- push8Low val cpu
-      return (cpu', 4)
+      return (cpu', 1)
     POP SubOpPopLow stk -> do
       (cpu', low) <- pop8 cpu
-      return (cpu'{currentInstruction=Just (POP (SubOpPopHigh low) stk)}, 4)
+      return (cpu'{currentInstruction=Just (POP (SubOpPopHigh low) stk)}, 1)
     POP (SubOpPopHigh low) AFstk -> do
       (cpu', high) <- pop8 cpu
-      return (cpu {registers = setR16Stk AFstk (toWord16 (low .&. 0xF0) high) cpu'.registers}, 4)
+      return (cpu {registers = setR16Stk AFstk (toWord16 (low .&. 0xF0) high) cpu'.registers}, 1)
     POP (SubOpPopHigh low) stk -> do
       (cpu', high) <- pop8 cpu
-      return (cpu {registers = setR16Stk stk (toWord16 low high) cpu'.registers}, 4)
+      return (cpu {registers = setR16Stk stk (toWord16 low high) cpu'.registers}, 1)
     RLA -> do
       val <- readR8 regs bus A
       let c = cflag regs
@@ -430,13 +446,14 @@ executeInstruction cpu op = do
     DI -> return (cpu {ime = Disabled}, 0)
     RETI SubOpPopLow -> do
       (cpu', low) <- pop8 cpu
-      return (cpu'{currentInstruction=Just (RETI $ SubOpPopHigh low)}, 4)
+      return (cpu'{currentInstruction=Just (RETI $ SubOpPopHigh low)}, 1)
     RETI (SubOpPopHigh low) -> do
       -- RET + enable IME
       (cpu', high) <- pop8 cpu
       let pc = toWord16 low high
-      return (cpu'{registers = cpu'.registers {rPC = pc}, ime = GetIntRequest}, 8)
+      return (cpu'{registers = cpu'.registers {rPC = pc}, ime = GetIntRequest}, 2)
     JP_imm16 addr ->
-      return (cpu{registers = cpu.registers {rPC = addr}}, 4)
+      return (cpu{registers = cpu.registers {rPC = addr}}, 1)
     JP_HL -> return (cpu {registers = cpu.registers {rPC = readR16 regs HL}}, 0)
+    STOP -> return (cpu, 0)
     _ -> todo $ "execute instruction op " ++ show op

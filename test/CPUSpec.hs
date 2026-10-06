@@ -1,6 +1,6 @@
 module CPUSpec (spec) where
 
-import Bus (bootRomEnabled, readByte, writeByte, initBus)
+import Bus (Bus, bootRomEnabled, readByte, writeByte, initBus, increaseTimer)
 import CPU (CPU (..), initCPU)
 import qualified PPU
 import qualified CPU
@@ -46,7 +46,7 @@ execute endPred cpu ppu = do
     then return (cpu, ppu)
     else do
       (cpu', cycles) <- CPU.execute cpu
-      ppu' <- PPU.execute cycles ppu
+      ppu' <- PPU.execute (cycles * 4) ppu
       execute endPred cpu' ppu'
 
 
@@ -59,8 +59,79 @@ executeOneCPUInstruction = go 0
             Nothing -> return (cpu1, elapsed + elapsed1)
             _ -> go (elapsed + elapsed1) cpu1
 
+-- Four M-cycles at TAC=5 overflow TIMA and leave the reload pending.
+timerOverflowBus :: IO Bus
+timerOverflowBus = do
+  bus <- initBus BL.empty BL.empty
+  writeByte 0xFF07 5 bus
+  writeByte 0xFF05 0xFF bus
+  writeByte 0xFF06 0xAB bus
+  increaseTimer 4 bus
+  return bus
+
 spec :: SpecWith ()
 spec = describe "CPU" $ do
+  describe "timer overflow" $ do
+    it "delays reload by one M-cycle and requests the interrupt only once" $ do
+      bus <- timerOverflowBus
+      readByte 0xFF05 bus `shouldReturn` 0
+      readByte 0xFF0F bus `shouldReturn` 0
+      increaseTimer 1 bus
+      readByte 0xFF05 bus `shouldReturn` 0xAB
+      readByte 0xFF0F bus `shouldReturn` 4
+      writeByte 0xFF0F 0 bus
+      increaseTimer 1 bus
+      readByte 0xFF0F bus `shouldReturn` 0
+
+    it "cancels pending reload and interrupt when TIMA is written during the delay" $ do
+      bus <- timerOverflowBus
+      writeByte 0xFF05 0x77 bus
+      increaseTimer 1 bus
+      readByte 0xFF05 bus `shouldReturn` 0x77
+      readByte 0xFF0F bus `shouldReturn` 0
+
+    it "ignores TIMA writes throughout reloading and accepts them afterwards" $ do
+      bus <- timerOverflowBus
+      increaseTimer 1 bus
+      writeByte 0xFF05 0x77 bus
+      readByte 0xFF05 bus `shouldReturn` 0xAB
+      writeByte 0xFF05 0x66 bus
+      readByte 0xFF05 bus `shouldReturn` 0xAB
+      increaseTimer 1 bus
+      writeByte 0xFF05 0x77 bus
+      readByte 0xFF05 bus `shouldReturn` 0x77
+
+    it "uses TMA written during the delay without changing TIMA early" $ do
+      bus <- timerOverflowBus
+      writeByte 0xFF06 0x66 bus
+      readByte 0xFF05 bus `shouldReturn` 0
+      increaseTimer 1 bus
+      readByte 0xFF05 bus `shouldReturn` 0x66
+      readByte 0xFF0F bus `shouldReturn` 4
+
+    it "updates both TMA and TIMA when TMA is written during reloading" $ do
+      bus <- timerOverflowBus
+      increaseTimer 1 bus
+      writeByte 0xFF06 0x66 bus
+      readByte 0xFF06 bus `shouldReturn` 0x66
+      readByte 0xFF05 bus `shouldReturn` 0x66
+      writeByte 0xFF05 0x77 bus
+      readByte 0xFF05 bus `shouldReturn` 0x66
+      increaseTimer 1 bus
+      writeByte 0xFF06 0x55 bus
+      readByte 0xFF05 bus `shouldReturn` 0x66
+
+    it "handles overflow and reload within a batch of M-cycles" $ do
+      bus <- initBus BL.empty BL.empty
+      writeByte 0xFF07 5 bus
+      writeByte 0xFF05 0xFF bus
+      writeByte 0xFF06 0xAB bus
+      increaseTimer 6 bus
+      readByte 0xFF05 bus `shouldReturn` 0xAB
+      readByte 0xFF0F bus `shouldReturn` 4
+      writeByte 0xFF05 0x77 bus
+      readByte 0xFF05 bus `shouldReturn` 0x77
+
   it "execute first instruction" $ do
     cpu <- testCPU
     (cpu1, _) <- executeOneCPUInstruction cpu
@@ -77,12 +148,12 @@ spec = describe "CPU" $ do
     writeByte 0xFF0F 0x04 start.bus -- Request Timer.
     writeByte 0xFFFE 0xAA start.bus
     let runService elapsed state
-          | elapsed == 20 = return state
+          | elapsed == 5 = return state
           | otherwise = do
               (state', cycles) <- CPU.execute state
               cycles `shouldSatisfy` (> 0)
               let elapsed' = elapsed + fromIntegral cycles
-              elapsed' `shouldSatisfy` (<= 20)
+              elapsed' `shouldSatisfy` (<= 5)
               state'.currentInstruction `shouldBe` Nothing
               runService elapsed' state'
     cpu3 <- runService (0 :: Int) start

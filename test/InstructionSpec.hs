@@ -35,26 +35,26 @@ spec = describe "Instruction" $ do
   it "LDH_AtImm8_A 0x01" $ do
     cpu <- testCPU
     cpu1 <- cpuWriteR8 A 0x12 cpu
-    (cpu2, 4) <- executeInstruction cpu1 (LDH_AtImm8_A 0x01)
+    (cpu2, 1) <- executeInstruction cpu1 (LDH_AtImm8_A 0x01)
     res <- readByteHighMemory 0x01 cpu2.bus
     res `shouldBe` 0x12
   it "LD_AtR16mem_A HLi" $ do
     cpu <- testCPU
     cpu1 <- cpuInitR8 [(A, 0xCC), (H, 0x80), (L, 0x00)] cpu
-    (cpu2, 4) <- executeInstruction cpu1 (LD_AtR16mem_A HLi)
+    (cpu2, 1) <- executeInstruction cpu1 (LD_AtR16mem_A HLi)
     let hl = readR16 cpu2.registers HL
     hl `shouldBe` 0x8001
     val <- readByte 0x8000 cpu2.bus
     val `shouldBe` 0xCC
   it "JR_imm8 0x12" $ do
     cpu <- testCPU
-    (cpu1, 4) <- executeInstruction cpu (JR_imm8 0x12)
+    (cpu1, 1) <- executeInstruction cpu (JR_imm8 0x12)
     cpu1.registers.rPC `shouldBe` 0x12
   it "JR_cond_imm8 Z 0x12" $ do
     cpu <- testCPU
     let regs = setZflag True cpu.registers
         cpu1 = cpu {registers = regs}
-    (cpu2, 4) <- executeInstruction cpu1 (JR_cond_imm8 Z 0x12)
+    (cpu2, 1) <- executeInstruction cpu1 (JR_cond_imm8 Z 0x12)
     cpu2.registers.rPC `shouldBe` 0x12
   it "JR_cond_imm8 Z 0x12 (not jump)" $ do
     cpu <- testCPU
@@ -79,7 +79,7 @@ spec = describe "Instruction" $ do
   it "LDH_AtC_A" $ do
     cpu <- testCPU
     cpu1 <- cpuInitR8 [(C, 0x01), (A, 0xAA)] cpu
-    (cpu2, 4) <- executeInstruction cpu1 LDH_AtC_A
+    (cpu2, 1) <- executeInstruction cpu1 LDH_AtC_A
     val <- readByteHighMemory 0x01 cpu2.bus
     val `shouldBe` 0xAA
   it "INC_r8 SubOpRead D" $ do
@@ -92,7 +92,7 @@ spec = describe "Instruction" $ do
   it "INC_r16 BC" $ do
     cpu <- testCPU
     cpu1 <- cpuWriteR16 BC 0x0102 cpu
-    (cpu2, 4) <- executeInstruction cpu1 $ INC_r16 BC
+    (cpu2, 1) <- executeInstruction cpu1 $ INC_r16 BC
     cpu2.registers.rB `shouldBe` 0x01
     cpu2.registers.rC `shouldBe` 0x03
   it "DEC_r8 E" $ do
@@ -113,13 +113,13 @@ spec = describe "Instruction" $ do
     cpu <- testCPU
     writeByte 0x8001 0xAA cpu.bus
     cpu1 <- cpuInitR8 [(H, 0x80), (L, 0x01)] cpu
-    (cpu2, 4) <- executeInstruction cpu1 $ LD_A_AtR16mem HLd
+    (cpu2, 1) <- executeInstruction cpu1 $ LD_A_AtR16mem HLd
     cpu2.registers.rL `shouldBe` 0x00
     cpu2.registers.rA `shouldBe` 0xAA
   it "CALL_addr16 0x1234" $ do
     cpu <- cpuInitPC 0x0003 <$> testCPU
     (cpu1, 0) <- executeInstruction cpu $ LD_r16_imm16 SP 0xFFFE
-    (cpu2, 12) <- executeInstructionSteps cpu1 $ CALL_addr16 SubOpCallWait 0x1234
+    (cpu2, 3) <- executeInstructionSteps cpu1 $ CALL_addr16 SubOpCallWait 0x1234
     cpu2.registers.rSP `shouldBe` 0xFFFC
     cpu2.registers.rPC `shouldBe` 0x1234
     l <- readByte 0xFFFC cpu.bus
@@ -129,17 +129,17 @@ spec = describe "Instruction" $ do
   it "RET" $ do
     cpu <- cpuInitPC 0x0003 <$> testCPU
     (cpu1, 0) <- executeInstruction cpu $ LD_r16_imm16 SP 0xFFFE
-    (cpu2, 12) <- executeInstructionSteps cpu1 $ CALL_addr16 SubOpCallWait 0x1234
+    (cpu2, 3) <- executeInstructionSteps cpu1 $ CALL_addr16 SubOpCallWait 0x1234
     cpu2.registers.rSP `shouldBe` 0xFFFC
     cpu2.registers.rPC `shouldBe` 0x1234
-    (cpu3, 12) <- executeInstructionSteps cpu2 $ RET SubOpPopLow
+    (cpu3, 3) <- executeInstructionSteps cpu2 $ RET SubOpPopLow
     cpu3.registers.rPC `shouldBe` 0x0003
     cpu3.registers.rSP `shouldBe` 0xFFFE
   it "PUSH BCstk" $ do
     cpu <- testCPU
     cpu2 <- cpuInitR8 [(B, 0x12), (C, 0xA0)] cpu
     (cpu3, 0) <- executeInstruction cpu2 $ LD_r16_imm16 SP 0xFFFE
-    (cpu4, 12) <- executeInstructionSteps cpu3 $ PUSH SubOpPushWait BCstk
+    (cpu4, 3) <- executeInstructionSteps cpu3 $ PUSH SubOpPushWait BCstk
     cpu4.registers.rSP `shouldBe` 0xFFFC
     l <- readByte 0xFFFC cpu.bus
     l `shouldBe` 0xA0
@@ -164,7 +164,7 @@ spec = describe "Instruction" $ do
     cpu1 <- cpuWriteR16 SP 0xFFF0 cpu
     writeByte 0xFFF0 0xBF cpu1.bus
     writeByte 0xFFF1 0x12 cpu1.bus
-    (cpu2, 8) <- executeInstructionSteps cpu1 $ POP SubOpPopLow AFstk
+    (cpu2, 2) <- executeInstructionSteps cpu1 $ POP SubOpPopLow AFstk
     cpu2.registers.rSP `shouldBe` 0xFFF2
     cpu2.registers.rA `shouldBe` 0x12
     cpu2.registers.rF `shouldBe` 0xB0
@@ -172,7 +172,7 @@ spec = describe "Instruction" $ do
     cpu <- testCPU >>= cpuWriteR16 SP 0xFFF0
     writeByte 0xFFF0 0x34 cpu.bus
     writeByte 0xFFF1 0x12 cpu.bus
-    (cpu1, 8) <- executeInstructionSteps cpu $ POP SubOpPopLow BCstk
+    (cpu1, 2) <- executeInstructionSteps cpu $ POP SubOpPopLow BCstk
     cpu1.registers.rSP `shouldBe` 0xFFF2
     getBC cpu1.registers `shouldBe` 0x1234
   it "ALU_A_imm8 CP 0x34" $ do
@@ -181,13 +181,13 @@ spec = describe "Instruction" $ do
     cpu1.registers.rF `shouldBe` 0x70
   it "LD_Addr16_A 0x8000" $ do
     cpu <- testCPU >>= cpuWriteR8 A 0xAA
-    (_, 4) <- executeInstruction cpu $ LD_Addr16_A 0x8000
+    (_, 1) <- executeInstruction cpu $ LD_Addr16_A 0x8000
     val <- readByte 0x8000 cpu.bus
     val `shouldBe` 0xAA
   it "LDH_A_AtImm8 0x10" $ do
     cpu <- testCPU
     writeByteHighMemory 0x10 0xBB cpu.bus
-    (cpu1, 4) <- executeInstruction cpu $ LDH_A_AtImm8 0x10
+    (cpu1, 1) <- executeInstruction cpu $ LDH_A_AtImm8 0x10
     cpu1.registers.rA `shouldBe` 0xBB
 
 -- Run execution steps only; these tests start after instruction fetching.

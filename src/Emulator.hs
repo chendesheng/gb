@@ -75,15 +75,16 @@ advanceFrame :: Emulator -> IO Emulator
 advanceFrame emulator = do
     (cpu', cycles) <- CPU.execute emulator.cpu
     let vblank = PPU.isVBlankMode emulator.ppu
-    ppu' <- PPU.execute cycles emulator.ppu
+    ppu' <- PPU.execute  (cycles * 4) emulator.ppu
 
     when (not vblank && PPU.isVBlankMode ppu') $ presentDisplay emulator
     consumeEvent emulator
 
+    let emulator' = emulator{cpu=cpu', ppu=ppu'}
     if vblank && not (PPU.isVBlankMode ppu') then
-      return emulator{cpu=cpu', ppu=ppu'}
+      return emulator'
     else
-      advanceFrame emulator{cpu=cpu', ppu=ppu'}
+      advanceFrame emulator'
   where
 
     presentDisplay :: Emulator -> IO ()

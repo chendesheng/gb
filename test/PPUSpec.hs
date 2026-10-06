@@ -155,8 +155,8 @@ runAcid2 cpu = go (20 * 70224) 2000000 cpu (PPU.initPPU cpu.bus)
               ++ showHex cpu.registers.rPC "" ++ "; actual frame: " ++ actualPath
           else do
             (cpu', cycles) <- CPU.execute cpu `catch` executionFailure cpu ppu
-            ppu' <- PPU.execute cycles ppu
-            go (remaining - fromIntegral cycles) (steps - 1) cpu' ppu'
+            ppu' <- PPU.execute (cycles * 4) ppu
+            go (remaining - fromIntegral cycles * 4) (steps - 1) cpu' ppu'
 
     executionFailure :: CPU.CPU -> PPU.PPU -> ErrorCall -> IO (CPU.CPU, Word8)
     executionFailure cpu ppu err = do

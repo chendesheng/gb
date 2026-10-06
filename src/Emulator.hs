@@ -3,6 +3,7 @@ module Emulator (
   powerOn,
   advanceFrame,
   setJoypadKey,
+  trySetJoypadKey,
   runInBackground,
   EmulatorWorker,
   stopWorker,
@@ -17,7 +18,7 @@ import Bus (initBus, JoypadKey, setJoypad)
 import CPU (initCPU, CPU)
 import PPU (initPPU, PPU, Display)
 import Control.Concurrent.STM (TMVar, atomically, tryPutTMVar, tryTakeTMVar, newEmptyTMVarIO)
-import Control.Concurrent.STM.TBQueue (TBQueue, newTBQueue, tryReadTBQueue, writeTBQueue)
+import Control.Concurrent.STM.TBQueue (TBQueue, isFullTBQueue, newTBQueue, tryReadTBQueue, writeTBQueue)
 import Control.Concurrent (MVar, ThreadId, forkIOWithUnmask, killThread, newEmptyMVar, putMVar, readMVar)
 import Control.Exception (AsyncException (ThreadKilled), SomeException, finally, fromException, mask_, try)
 import Control.Monad (void, when)
@@ -99,6 +100,13 @@ advanceFrame emulator = do
 setJoypadKey :: JoypadKey -> Bool -> Emulator -> IO ()
 setJoypadKey key press emulator =
   atomically $ writeTBQueue emulator.inputQueue (KeyEvent key press)
+
+trySetJoypadKey :: JoypadKey -> Bool -> Emulator -> IO Bool
+trySetJoypadKey key press emulator = atomically $ do
+  full <- isFullTBQueue emulator.inputQueue
+  if full then pure False else do
+    writeTBQueue emulator.inputQueue (KeyEvent key press)
+    pure True
 
 nextDisplay :: Emulator -> IO (Maybe Display)
 nextDisplay emulator = do

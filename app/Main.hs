@@ -4,14 +4,17 @@
 module Main (main) where
 
 import Control.Exception (SomeException, bracket, displayException, mask_, try)
-import Control.Monad (unless, when)
+import Control.Monad (foldM, unless, when)
+import Bus (JoypadKey (..))
 import qualified Color as GB
 import qualified Data.ByteString.Lazy as BL
 import Data.Char (toLower)
+import Data.Bits (clearBit, setBit, testBit)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, writeIORef)
 import Data.Maybe (isJust)
 import qualified Data.Vector as V
-import Emulator (Emulator, EmulatorWorker, powerOn, runInBackground, stopWorker, nextWorkerError, nextDisplay)
+import Data.Word (Word8)
+import Emulator (Emulator, EmulatorWorker, powerOn, runInBackground, stopWorker, nextWorkerError, nextDisplay, trySetJoypadKey)
 import Foreign.Marshal.Array (withArray)
 import Foreign.Ptr (castPtr)
 import qualified NativeMenu as Menu
@@ -19,7 +22,7 @@ import Paths_gb (getDataFileName)
 import PPU (Display (..))
 import Raylib.Core
   ( clearBackground, closeWindow, getMouseX, getMouseY, getWindowPosition,
-    initWindow, isMouseButtonDown, isMouseButtonPressed, isWindowReady,
+    initWindow, isKeyDown, isMouseButtonDown, isMouseButtonPressed, isWindowFocused, isWindowReady,
     setConfigFlags, setMousePosition, setTargetFPS, setWindowPosition,
     setWindowSize, windowShouldClose )
 import Raylib.Core.Shapes (drawRectangle)
@@ -29,6 +32,7 @@ import Raylib.Core.Textures
     loadImage, loadTexture, loadTextureFromImage, setTextureFilter, updateTexture )
 import Raylib.Types
   ( Color (..), ConfigFlag (WindowHighdpi, WindowTransparent, WindowUndecorated),
+    KeyboardKey (KeyH, KeyJ, KeyK, KeyL, KeyA, KeyS, KeyD, KeyF),
     MouseButton (MouseButtonLeft), Rectangle (..), Texture (..),
     TextureFilter (TextureFilterBilinear, TextureFilterPoint, TextureFilterTrilinear),
     pattern Vector2, vector2'x, vector2'y )
@@ -44,6 +48,7 @@ data UIState = UIState
   , emulator :: Maybe Emulator
   , paused :: Bool
   , dragAnchor :: Maybe (Int, Int)
+  , keyState :: !Word8
   }
 
 data Assets = Assets
@@ -90,7 +95,7 @@ main = do
     Menu.installMenu
     bracket (newIORef Nothing) stopCurrentWorker $ \worker ->
       loop (Assets device batteryOff batteryOn lcd boot worker) width height
-        (UIState Nothing Nothing False Nothing)
+        (UIState Nothing Nothing False Nothing 0)
 
 -- The app bundle carries its own resources; Cabal supplies paths for cabal run.
 resourcePath :: FilePath -> IO FilePath
@@ -122,6 +127,7 @@ loop assets width height state = do
         maybeDisplay <- nextDisplay machine
         for_ maybeDisplay (updateLCD assets.lcd)
       Nothing -> pure ()
+    state4 <- handleKeys state3
     drawing $ do
       clearBackground blank
       drawRectangle 287 100 263 238 black
@@ -131,14 +137,14 @@ loop assets width height state = do
       -- Both generated sprites cover the original red LED and share this location.
       let indicator = if isJust state3.emulator then assets.batteryOn else assets.batteryOff
       drawTexture indicator (Rectangle 232 177 20 20)
-    loop assets width height state3{dragAnchor=anchor}
+    loop assets width height state4{dragAnchor=anchor}
 
 handleAction :: Assets -> UIState -> Maybe Menu.MenuAction -> IO UIState
 handleAction assets state action = case action of
   Nothing -> pure state
   Just Menu.PowerOff -> do
     stopCurrentWorker assets.worker
-    pure state{emulator=Nothing, paused=False}
+    pure state{emulator=Nothing, paused=False, keyState=0}
   Just Menu.PowerOn -> case state.cartridge of
     Nothing -> pure state
     Just rom -> start rom
@@ -163,7 +169,30 @@ handleAction assets state action = case action of
             stopCurrentWorker assets.worker
             worker <- runInBackground machine
             writeIORef assets.worker (Just worker)
-          pure state{cartridge=Just rom, emulator=Just machine, paused=False}
+          pure state{cartridge=Just rom, emulator=Just machine, paused=False, keyState=0}
+
+handleKeys :: UIState -> IO UIState
+handleKeys state = case state.emulator of
+  Just machine | not state.paused -> do
+    focused <- isWindowFocused
+    foldM (updateKey machine focused) state keyBindings
+  _ -> pure state
+  where
+    updateKey machine focused current (keyboardKey, joypadKey) = do
+      pressed <- if focused then isKeyDown keyboardKey else pure False
+      let bit = fromEnum joypadKey
+      if pressed == testBit current.keyState bit then pure current else do
+        accepted <- trySetJoypadKey joypadKey pressed machine
+        -- Retain the previous state if full, so the change is retried next frame.
+        pure $ if accepted
+          then current{keyState = (if pressed then setBit else clearBit) current.keyState bit}
+          else current
+
+keyBindings :: [(KeyboardKey, JoypadKey)]
+keyBindings =
+  [ (KeyH, LeftKey), (KeyJ, DownKey), (KeyK, UpKey), (KeyL, RightKey)
+  , (KeyA, StartKey), (KeyS, SelectKey), (KeyD, BKey), (KeyF, AKey)
+  ]
 
 stopCurrentWorker :: IORef (Maybe EmulatorWorker) -> IO ()
 stopCurrentWorker workerRef = mask_ $ do

@@ -12,6 +12,12 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Emulator worker" $ do
+  it "does not block the UI when the input queue is full" $ do
+    machine <- powerOn BL.empty BL.empty
+    trySetJoypadKey AKey True machine `shouldReturn` True
+    trySetJoypadKey AKey False machine `shouldReturn` True
+    timeout 2000000 (trySetJoypadKey AKey True machine) `shouldReturn` Just False
+
   it "stops a running worker started with exceptions masked without reporting a failure" $ do
     machine <- powerOn (BL.pack $ [0x18, 0xFE] ++ replicate 254 0) BL.empty
     bracket (mask_ $ runInBackground machine) stopWorker $ \worker -> do

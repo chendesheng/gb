@@ -39,7 +39,7 @@ import Raylib.Types
 import Raylib.Util (drawing, managed)
 import Raylib.Util.Colors (black, blank, white)
 import System.Directory (doesFileExist)
-import System.Environment (getExecutablePath)
+import System.Environment (getArgs, getExecutablePath)
 import System.FilePath ((</>), takeDirectory, takeExtension)
 import Data.Foldable (for_)
 
@@ -62,6 +62,11 @@ data Assets = Assets
 
 main :: IO ()
 main = do
+  args <- getArgs
+  cartridgePath <- case args of
+    [] -> pure Nothing
+    [path] -> pure (Just path)
+    _ -> ioError (userError "Usage: gb-exe [cartridge.gb|cartridge.bin]")
   imagePath <- resourcePath "device.png"
   setConfigFlags [WindowUndecorated, WindowHighdpi, WindowTransparent]
   bracket (initWindow 836 471 "Game Boy") (closeWindow . Just) $ \window -> do
@@ -93,9 +98,11 @@ main = do
     setWindowSize width height
     setTargetFPS 60
     Menu.installMenu
-    bracket (newIORef Nothing) stopCurrentWorker $ \worker ->
-      loop (Assets device batteryOff batteryOn lcd boot worker) width height
-        (UIState Nothing Nothing False Nothing 0)
+    bracket (newIORef Nothing) stopCurrentWorker $ \worker -> do
+      let assets = Assets device batteryOff batteryOn lcd boot worker
+      state <- handleAction assets (UIState Nothing Nothing False Nothing 0)
+        (Menu.OpenCartridge <$> cartridgePath)
+      loop assets width height state
 
 -- The app bundle carries its own resources; Cabal supplies paths for cabal run.
 resourcePath :: FilePath -> IO FilePath

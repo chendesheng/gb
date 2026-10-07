@@ -56,7 +56,32 @@ module Bus
     readLY,
     writeLY,
     advanceLY,
-  )
+    readNR52,
+    readNR51,
+    readNR50,
+    readNR10,
+    readNR11,
+    readNR12,
+    readNR13,
+    readNR14,
+    readNR22,
+    readNR21,
+    readNR23,
+    readNR24,
+    readNR30,
+    readNR31,
+    readNR32,
+    readNR33,
+    readNR34,
+    readNR42,
+    readNR44,
+    readNR43,
+    readNR41,
+    readJOYP,
+    detectFallingEdge,
+    clearTIMAOverflow,
+    requestJoypadInt,
+ )
 where
 
 import Data.Binary.Get (runGet)
@@ -71,7 +96,8 @@ import Instruction (Instruction, instructionDecoder)
 import Registers
 import Prelude hiding (length)
 import Color
-import Control.Monad (unless, when)
+import Control.Monad (when)
+import Dbg
 
 type Rom = Vector Word8
 
@@ -85,6 +111,10 @@ readRam addr ram = MV.read ram $ fromIntegral addr
 
 writeRam :: Address -> Word8 -> Ram -> IO ()
 writeRam addr val ram = MV.write ram (fromIntegral addr) val
+
+readRamMany :: Address -> Word8 -> Ram -> IO (Vector Word8)
+readRamMany addr size ram =
+  V.freeze (MV.slice (fromIntegral addr) (fromIntegral size) ram)
 
 type Address = Word16
 
@@ -100,7 +130,8 @@ data Bus = Bus
     joypad :: IORef Word8,
     systemCounter :: IORef Word16,
     timaOverflow :: IORef TIMAOverflow,
-    dma :: IORef DMA
+    dma :: IORef DMA,
+    wavePattern :: Ram
   }
 
 data TIMAOverflow = NoTIMAOverflow | TIMAOverflowDelay | TIMAOverflowReloading
@@ -113,6 +144,7 @@ initBus boot cartridge = do
   wram <- MV.replicate 0x2000 0xCD -- C000-DFFF
   oam <- MV.replicate 0x00A0 0xCD -- FE00-FE9F
   io <- MV.replicate 0x0080 0x00 -- FF00-FF7F, rough/simple
+  wavePattern <- MV.replicate 0x0F 0x00
   writeRam 0 0x0F io
   hram <- MV.replicate 0x007F 0xCD -- FF80-FFFE
   ie  <- newIORef 0x00
@@ -133,7 +165,8 @@ initBus boot cartridge = do
         joypad,
         systemCounter,
         timaOverflow,
-        dma
+        dma,
+        wavePattern
       }
 
 readByte0xFF50 :: Bus -> IO Word8
@@ -192,6 +225,8 @@ readByteRaw addr bus
   | 0xFF07 == addr = do
     val <- readRam 7 bus.io
     return $ val .|. 0xF8
+  | 0xFF30 <= addr && addr < 0xFF40 =
+      readRam (addr - 0xFF30) bus.wavePattern
   | 0xFF00 < addr && addr < 0xFF80 =
       readRam (addr - 0xFF00) bus.io
   | 0xFF80 <= addr && addr < 0xFFFF =
@@ -258,6 +293,14 @@ writeByteRaw addr val bus
           _ -> return ()
       | 0xFF07 == addr = do
         detectFallingEdge (\bus' -> writeRam 7 val bus'.io) bus
+      | 0xFF19 == addr = do
+        -- NR24
+        when (val `testBit` 7) $ do
+          ena <- readNR52 bus
+          writeRam 0x26 (ena `setBit` 1) bus.io
+        writeRam 0x19 val bus.io
+      | 0xFF30 <= addr && addr < 0xFF40 =
+          writeRam (addr - 0xFF30) val bus.wavePattern
       | 0xFF40 == addr = do
           updateSTATInterrupt bus $ do
             oldLcdc <- readLcdC bus
@@ -682,3 +725,72 @@ executeDMACopy times bus = do
       writeRam (fromIntegral n) source bus.oam
       writeIORef bus.dma $ if n == 0x9F then NoDMA else DMACopying (n + 1)
       executeDMACopy (times - 1) bus
+
+-- APU
+
+readNR52 :: Bus -> IO Word8
+readNR52 bus = readRam 0x26 bus.io
+
+readNR51 :: Bus -> IO Word8
+readNR51 bus = readRam 0x25 bus.io
+
+readNR50 :: Bus -> IO Word8
+readNR50 bus = readRam 0x24 bus.io
+
+readNR10 :: Bus -> IO Word8
+readNR10 bus = readRam 0x10 bus.io
+
+readNR11 :: Bus -> IO Word8
+readNR11 bus = readRam 0x11 bus.io
+
+readNR12 :: Bus -> IO Word8
+readNR12 bus = readRam 0x12 bus.io
+
+readNR13 :: Bus -> IO Word8
+readNR13 bus = readRam 0x13 bus.io
+
+readNR14 :: Bus -> IO Word8
+readNR14 bus = readRam 0x14 bus.io
+
+-- CH2
+readNR21 :: Bus -> IO Word8
+readNR21 bus = readRam 0x16 bus.io
+
+readNR22 :: Bus -> IO Word8
+readNR22 bus = readRam 0x17 bus.io
+
+readNR23 :: Bus -> IO Word8
+readNR23 bus = readRam 0x18 bus.io
+
+readNR24 :: Bus -> IO Word8
+readNR24 bus = readRam 0x19 bus.io
+
+readNR30 :: Bus -> IO Word8
+readNR30 bus = readRam 0x1A bus.io
+
+readNR31 :: Bus -> IO Word8
+readNR31 bus = readRam 0x1B bus.io
+
+readNR32 :: Bus -> IO Word8
+readNR32 bus = readRam 0x1C bus.io
+
+readNR33 :: Bus -> IO Word8
+readNR33 bus = readRam 0x1D bus.io
+
+readNR34 :: Bus -> IO Word8
+readNR34 bus = readRam 0x1E bus.io
+
+readWavePattern :: Bus -> IO (Vector Word8)
+readWavePattern _ = todo "readWavePattern"
+
+readNR41 :: Bus -> IO Word8
+readNR41 bus = readRam 0x20 bus.io
+
+readNR42 :: Bus -> IO Word8
+readNR42 bus = readRam 0x21 bus.io
+
+readNR43 :: Bus -> IO Word8
+readNR43 bus = readRam 0x22 bus.io
+
+readNR44 :: Bus -> IO Word8
+readNR44 bus = readRam 0x23 bus.io

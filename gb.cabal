@@ -76,7 +76,7 @@ library gb-lib
     -- Import common warning flags.
     import:           warnings, shared
     ghc-options: -fprof-auto -Wno-unused-top-binds
-    exposed-modules: Instruction, Color, Bus, CPU, PPU, Registers, Emulator
+    exposed-modules: Instruction, Color, Bus, CPU, PPU, APU, Registers, Emulator
     other-modules: Dbg
     -- Directories containing source files.
     hs-source-dirs:   src

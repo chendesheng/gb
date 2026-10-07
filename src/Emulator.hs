@@ -22,12 +22,17 @@ import Control.Concurrent.STM.TBQueue (TBQueue, isFullTBQueue, newTBQueue, tryRe
 import Control.Concurrent (MVar, ThreadId, forkIOWithUnmask, killThread, newEmptyMVar, putMVar, readMVar)
 import Control.Exception (AsyncException (ThreadKilled), SomeException, finally, fromException, mask_, try)
 import Control.Monad (void, when)
+import APU (APU(..), initAPU, MixedSamples)
+import qualified Data.Vector.Unboxed as V
+import qualified APU
 
 data Emulator = Emulator
   { cpu :: !CPU
   , ppu :: !PPU
+  , apu :: !APU
   , inputQueue  :: TBQueue KeyEvent
   , outputQueue :: TBQueue Display
+  , outputAudioQueue :: TBQueue MixedSamples
   , workerError :: TMVar SomeException
   }
 
@@ -42,7 +47,9 @@ powerOn boot cartridge = do
   ppu <- initPPU cpu.bus
   inputQueue <- atomically $ newTBQueue 2
   outputQueue <- atomically $ newTBQueue 2
-  Emulator cpu ppu inputQueue outputQueue <$> newEmptyTMVarIO
+  outputAudioQueue <- atomically $ newTBQueue 2
+  let apu = initAPU cpu.bus
+  Emulator cpu ppu apu inputQueue outputQueue outputAudioQueue <$> newEmptyTMVarIO
 
 
 runInBackground :: Emulator -> IO EmulatorWorker
@@ -73,19 +80,29 @@ nextWorkerError emulator = atomically $ tryTakeTMVar emulator.workerError
 -- Carry the final instruction's overshoot into the next frame.
 advanceFrame :: Emulator -> IO Emulator
 advanceFrame emulator = do
-    (cpu', cycles) <- CPU.execute emulator.cpu
+    (cpu', elapsed) <- CPU.execute emulator.cpu
     let vblank = PPU.isVBlankMode emulator.ppu
-    ppu' <- PPU.execute  (cycles * 4) emulator.ppu
+    ppu' <- PPU.execute  (elapsed * 4) emulator.ppu
 
     when (not vblank && PPU.isVBlankMode ppu') $ presentDisplay emulator{ppu=ppu'}
     consumeEvent emulator
 
-    let emulator' = emulator{cpu=cpu', ppu=ppu'}
+    apu1 <- APU.execute (elapsed * 4) emulator.apu
+    apu2 <- sendAudioSamples emulator apu1
+
+    let emulator' = emulator{cpu=cpu', ppu=ppu', apu=apu2}
     if vblank && not (PPU.isVBlankMode ppu') then
       return emulator'
     else
       advanceFrame emulator'
   where
+    sendAudioSamples :: Emulator -> APU -> IO APU
+    sendAudioSamples em apu = do
+      -- if V.length apu.buffer > 600 then do
+      --   atomically $ writeTBQueue em.outputAudioQueue apu.buffer
+      --   return apu{buffer=mempty}
+      -- else return apu
+      return apu
 
     presentDisplay :: Emulator -> IO ()
     presentDisplay em = do

@@ -183,8 +183,8 @@ toIntMode VerticalBlank = 1
 toIntMode (OAMScan _ _) = 2
 toIntMode (DrawingPixels {}) = 3
 
-step :: PPU -> IO PPU
-step ppu = do
+step :: Word8 -> PPU -> IO PPU
+step lcdc ppu = do
   let bus = ppu.bus
   case ppu.mode of
     OAMScan selectedOAMObjects Nothing -> do
@@ -198,7 +198,7 @@ step ppu = do
       return $ ppu'{mode=mode}
     OAMScan selectedOAMObjects (Just pending) -> do
       -- `LY` falls within `[Y - 16, Y - 16 + height)`
-      height <- readLcdCObjSize bus
+      let height = readLcdCObjSize lcdc
       ly <- fromIntegral <$> readLY bus
       let y = pending.position.yPos
       let objs = Vector.modify sort $
@@ -210,16 +210,16 @@ step ppu = do
           screenX <- initScreenX bus
           let mode = initDrawingPixels screenX objs
           wx <- readWXInt bus
-          bgEnable <- isLcdCBgEnable bus
-          windowEnable <- isLcdCWindowEnable bus
+          let bgEnable = lcdc `testBit` 0
+              windowEnable = lcdc `testBit` 5
           if wx == 0 && bgEnable && windowEnable && ppu.windowYTriggered then
             activeWindow wx ppu{mode=mode}
           else return $ ppu{mode=mode}
       else return $ ppu{mode=OAMScan objs Nothing}
     DrawingPixels {} -> do
-      bgEnable <- isLcdCBgEnable bus
-      windowEnable <- isLcdCWindowEnable bus
-      objEnable <- isLcdCObjEnable bus
+      let bgEnable = lcdc `testBit` 0
+          windowEnable = lcdc `testBit` 5
+          objEnable = lcdc `testBit` 1
       ppu1 <- if bgEnable && windowEnable then tryActiveWindow ppu ppu.mode else return ppu
       let windowActive = bgEnable && windowEnable && ppu1.windowYTriggered &&
                             case ppu1.mode of
@@ -348,22 +348,22 @@ step ppu = do
                                          }
                        else return mode
               addr <- case source of
-                        Window -> readWindowTileIndexAddr mode'.windowLine mode'.backgroundFetcherX ppu.bus
+                        Window -> return $ readWindowTileIndexAddr lcdc mode'.windowLine mode'.backgroundFetcherX
                         Background -> do
                           ly <- readLY bus
-                          readBgTileIndexAddr ly mode'.backgroundFetcherX bus
+                          readBgTileIndexAddr lcdc ly mode'.backgroundFetcherX bus
               return ppu{mode=mode'{fetcher=FetchBackground False (GetTileIndex addr), backgroundFetcherSource=source}}
             GetTileIndex addr -> do
               tileIndex <- readVRam addr bus
               return ppu{mode=mode{fetcher=FetchBackground False (GetTileDataLowAddress mode.backgroundFetcherSource tileIndex)}}
             GetTileDataLowAddress source tileIndex -> do
-              addr <- readBgTileRowBaseAddressForSource source tileIndex mode.windowLine bus
+              addr <- readBgTileRowBaseAddressForSource lcdc source tileIndex mode.windowLine bus
               return ppu{mode=mode{fetcher=FetchBackground False (GetTileDataLow addr source tileIndex)}}
             GetTileDataLow addr source tileIndex -> do
               low <- readVRam addr bus
               return ppu{mode=mode{fetcher=FetchBackground False (GetTileDataHighAddress source tileIndex low)}}
             GetTileDataHighAddress source tileIndex low -> do
-              addr <- readBgTileRowBaseAddressForSource source tileIndex mode.windowLine bus
+              addr <- readBgTileRowBaseAddressForSource lcdc source tileIndex mode.windowLine bus
               return ppu{mode=mode{fetcher=FetchBackground False (GetTileDataHigh (addr + 1) low)}}
             GetTileDataHigh addr low -> do
               high <- readVRam addr bus
@@ -408,7 +408,7 @@ step ppu = do
 
         objectDataAddr :: SelectedOAMObject -> OAMObjectAttributes -> IO Address
         objectDataAddr selected attr = do
-          height <- readLcdCObjSize bus
+          let height = readLcdCObjSize lcdc
           ly <- readLY bus
           let row = yFlipRow attr height $ fromIntegral ly - selected.position.yPos + 16
           let tileIndex = if height == 16 then attr.tileIndex .&. 0xFE else attr.tileIndex
@@ -504,28 +504,27 @@ tileIndexAddr base y x =
       x16 = fromIntegral x
   in base + (y16 `div` 8 * 32 + x16 `div` 8)
 
-readBgTileIndexAddr :: Word8 -> Word8 -> Bus -> IO Address
-readBgTileIndexAddr ly x bus = do
-  base <- readLcdCBgTileMapArea bus
+readBgTileIndexAddr :: Word8 -> Word8 -> Word8 -> Bus -> IO Address
+readBgTileIndexAddr lcdc ly x bus = do
+  let base = readLcdCBgTileMapArea lcdc
   scx <- readSCX bus
   scy <- readSCY bus
   let bgY = ly + scy
   let bgX = x + scx
   return $ tileIndexAddr base bgY bgX
 
-readWindowTileIndexAddr :: Word8 -> Word8 -> Bus -> IO Address
-readWindowTileIndexAddr windowLine x bus = do
-  base <- readLcdCWindowTileMapArea bus
-  return $ tileIndexAddr base windowLine x
+readWindowTileIndexAddr :: Word8 -> Word8 -> Word8 -> Address
+readWindowTileIndexAddr lcdc windowLine x =
+  tileIndexAddr (readLcdCWindowTileMapArea lcdc) windowLine x
 
-readBgTileRowBaseAddressForSource :: BackgroundFetcherSource -> TileIndex -> Word8 -> Bus -> IO Address
-readBgTileRowBaseAddressForSource source tileIndex windowLine bus =
+readBgTileRowBaseAddressForSource :: Word8 -> BackgroundFetcherSource -> TileIndex -> Word8 -> Bus -> IO Address
+readBgTileRowBaseAddressForSource lcdc source tileIndex windowLine bus =
   case source of
-    Window -> readBgTileRowBaseAddress tileIndex windowLine bus
+    Window -> return $ readBgTileRowBaseAddress tileIndex windowLine lcdc
     Background -> do
       scy <- readSCY bus
       ly <- readLY bus
-      readBgTileRowBaseAddress tileIndex (scy + ly) bus
+      return $ readBgTileRowBaseAddress tileIndex (scy + ly) lcdc
 
 isVBlankMode :: PPU -> Bool
 isVBlankMode PPU{mode=VerticalBlank} = True
@@ -534,15 +533,16 @@ isVBlankMode _ = False
 execute :: Word8 -> PPU -> IO PPU
 execute 0 ppu = return ppu
 execute duration ppu = do
+  lcdc <- readLcdC ppu.bus
   let wasOn = ppu.lcdOn
-  isOn <- isLcdOn ppu.bus
+      isOn = lcdc `testBit` 7
   case (wasOn, isOn) of
     (False, True) -> execute duration ppu{lcdOn=True, mode=initOAMScan}
     (True,  False) ->
       return ppu{x=0, mode=HorizontalBlank, lcdOn=False, windowYTriggered=False, windowLine=0}
     (False, False) -> return ppu
     (True, True) -> do
-      ppu1 <- step ppu
+      ppu1 <- step lcdc ppu
       when (toIntMode ppu.mode /= toIntMode ppu1.mode) $
         writePPUMode (toIntMode ppu1.mode) ppu.bus
       ppu2 <- advanceXY ppu1

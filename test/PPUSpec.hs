@@ -41,6 +41,19 @@ spec = describe "PPU" $ do
     blank Vector.! 0 `shouldBe` 0
     PPU.Display independent <- PPU.snapshotDisplay other
     Vector.all (== 0) independent `shouldBe` True
+  it "observes LCDC background-enable changes during a scanline" $ do
+    bus <- statTestBus
+    Mutable.set bus.vram 0xFF
+    writeByte 0xFF47 0xE4 bus
+    writeByte 0xFF40 0x91 bus
+    ppu <- PPU.initPPU bus >>= PPU.execute 128
+    PPU.Display before <- PPU.snapshotDisplay ppu
+    before Vector.! 0 `shouldBe` 3
+    writeByte 0xFF40 0x90 bus
+    ppu' <- PPU.execute 64 ppu
+    PPU.Display after <- PPU.snapshotDisplay ppu'
+    after Vector.! 0 `shouldBe` 3
+    after Vector.! 80 `shouldBe` 0
   describe "STAT interrupts" $ do
     it "requests each enabled mode interrupt only on a rising edge" $
       mapM_ (\(mode, enabled) -> do

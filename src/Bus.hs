@@ -13,14 +13,10 @@ module Bus
     writeR8,
     readR16Mem,
     bootRomEnabled,
-    isLcdOn,
     readLcdCWindowTileMapArea,
-    isLcdCWindowEnable,
     readLcdCBgTileDataArea,
     readLcdCBgTileMapArea,
     readLcdCObjSize,
-    isLcdCObjEnable,
-    isLcdCBgEnable,
     readLcdC,
     readLcdYC,
     readLYCIntSelect,
@@ -264,7 +260,8 @@ writeByteRaw addr val bus
         detectFallingEdge (\bus' -> writeRam 7 val bus'.io) bus
       | 0xFF40 == addr = do
           updateSTATInterrupt bus $ do
-            wasOn <- isLcdOn bus
+            oldLcdc <- readLcdC bus
+            let wasOn = oldLcdc `testBit` 7
             writeRam 0x40 val bus.io
             when (not (val `testBit` 7) || not wasOn) $ do
               writeLYRegisters 0 bus
@@ -368,42 +365,21 @@ readVRam addr bus =
   readRam (addr - 0x8000) bus.vram
 
 -- https://gbdev.io/pandocs/LCDC.html
-readLcdC :: Int -> Bus -> IO Bool
-readLcdC index bus = do
-  b <- readRam 0x40 bus.io
-  return $ (b .>>. index .&. 0x01) == 1
+readLcdC :: Bus -> IO Word8
+readLcdC bus = readRam 0x40 bus.io
 
-isLcdOn :: Bus -> IO Bool
-isLcdOn = readLcdC 7
+-- Decode a sampled LCDC byte without reading the register again.
+readLcdCWindowTileMapArea :: Word8 -> Address
+readLcdCWindowTileMapArea lcdc = if lcdc `testBit` 6 then 0x9C00 else 0x9800
 
-readLcdCWindowTileMapArea :: Bus -> IO Address
-readLcdCWindowTileMapArea bus = do
-  is9C00 <- readLcdC 6 bus
-  return $ if is9C00 then 0x9C00 else 0x9800
+readLcdCBgTileDataArea :: Word8 -> Address
+readLcdCBgTileDataArea lcdc = if lcdc `testBit` 4 then 0x8000 else 0x8800
 
-isLcdCWindowEnable :: Bus -> IO Bool
-isLcdCWindowEnable = readLcdC 5
+readLcdCBgTileMapArea :: Word8 -> Address
+readLcdCBgTileMapArea lcdc = if lcdc `testBit` 3 then 0x9C00 else 0x9800
 
-readLcdCBgTileDataArea :: Bus -> IO Address
-readLcdCBgTileDataArea bus = do
-  is8000 <- readLcdC 4 bus
-  return $ if is8000 then 0x8000 else 0x8800
-
-readLcdCBgTileMapArea :: Bus -> IO Address
-readLcdCBgTileMapArea bus = do
-  is9C00 <- readLcdC 3 bus
-  return $ if is9C00 then 0x9C00 else 0x9800
-
-readLcdCObjSize :: Bus -> IO Int
-readLcdCObjSize bus = do
-  is8x16 <- readLcdC 2 bus
-  return $ if is8x16 then 16 else 8
-
-isLcdCObjEnable :: Bus -> IO Bool
-isLcdCObjEnable = readLcdC 1
-
-isLcdCBgEnable :: Bus -> IO Bool
-isLcdCBgEnable = readLcdC 0
+readLcdCObjSize :: Word8 -> Int
+readLcdCObjSize lcdc = if lcdc `testBit` 2 then 16 else 8
 
 readLcdYC :: Bus -> IO Word8
 readLcdYC bus = readRam 0x45 bus.io
@@ -500,10 +476,10 @@ writePPUModeRegisters mode bus = do
 
 readSTATInterruptLine :: Bus -> IO Bool
 readSTATInterruptLine bus = do
-  lcdOn <- isLcdOn bus
+  lcdc <- readLcdC bus
   status <- readRam 0x41 bus.io
   let mode = status .&. 0x03
-  return $ lcdOn &&
+  return $ lcdc `testBit` 7 &&
         ((status `testBit` 3 && mode == 0)
           || (status `testBit` 4 && mode == 1)
           || (status `testBit` 5 && mode == 2)
@@ -547,14 +523,14 @@ readOAMAttributes addr bus = do
 
 type TileIndex = Word8
 
-readBgTileRowBaseAddress :: TileIndex -> Word8 -> Bus -> IO Address
-readBgTileRowBaseAddress index y bus = do
-  base <- readLcdCBgTileDataArea bus
-  let addr
+readBgTileRowBaseAddress :: TileIndex -> Word8 -> Word8 -> Address
+readBgTileRowBaseAddress index y lcdc =
+  let base = readLcdCBgTileDataArea lcdc
+      addr
         | base == 0x8000 = base + tileOffset index + rowOffset
         | index < 128 = 0x9000 + tileOffset index + rowOffset
         | otherwise = 0x8800 + tileOffset (index - 128) + rowOffset
-  return addr
+  in addr
   where
     -- each tile taking 16 bytes
     tileOffset i = fromIntegral i * 16

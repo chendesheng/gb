@@ -72,7 +72,6 @@ instance Show Display where
 
 data PPU = PPU
   { x :: Word16
-  , y :: Word8
   , mode :: PPUMode
   , lcdOn :: Bool
   , display :: !Display
@@ -96,7 +95,7 @@ instance Ord SelectedOAMObject where
       others -> others
 
 initPPU :: Bus -> PPU
-initPPU = PPU 0 0 HorizontalBlank False initDisplay 0 False
+initPPU = PPU 0 HorizontalBlank False initDisplay 0 False
 
 -- newtype Tile = Tile (Vector Word8) -- length 16
 
@@ -195,7 +194,7 @@ step ppu = do
     OAMScan selectedOAMObjects (Just pending) -> do
       -- `LY` falls within `[Y - 16, Y - 16 + height)`
       height <- readLcdCObjSize bus
-      let ly = fromIntegral ppu.y :: Int
+      ly <- fromIntegral <$> readLY bus
       let y = pending.position.yPos
       let objs = Vector.modify sort $
                     if y - 16 <= ly && ly < y - 16 + height && length selectedOAMObjects < 10 then
@@ -302,14 +301,16 @@ step ppu = do
                 let bgPixel' = if bgEnable then bgPixel else zeroPixel
                 let objPixel' = if objEnable then objPixel else zeroPixel
                 color <- pixelColor bgPixel' objPixel'
+                ly <- readLY bus
                 return ppu{ mode=mode{screenX=screenX+1, backgroundQueue=backgroundQueue, oamQueue=oamQueue}
-                          , display=renderPixel ppu.y screenX color ppu.display
+                          , display=renderPixel ly screenX color ppu.display
                           }
               (Just (pixel, backgroundQueue), Nothing) -> do
                 let pixel' = if bgEnable then pixel else zeroPixel
                 color <- bgPixelColor pixel'
+                ly <- readLY bus
                 return ppu{ mode=mode{screenX=screenX+1, backgroundQueue=backgroundQueue}
-                          , display=renderPixel ppu.y screenX color ppu.display
+                          , display=renderPixel ly screenX color ppu.display
                           }
               _ -> return ppu
         render ppu _ _ _ = return ppu
@@ -343,19 +344,21 @@ step ppu = do
                        else return mode
               addr <- case source of
                         Window -> readWindowTileIndexAddr mode'.windowLine mode'.backgroundFetcherX ppu.bus
-                        Background -> readBgTileIndexAddr ppu.y mode'.backgroundFetcherX bus
+                        Background -> do
+                          ly <- readLY bus
+                          readBgTileIndexAddr ly mode'.backgroundFetcherX bus
               return ppu{mode=mode'{fetcher=FetchBackground False (GetTileIndex addr), backgroundFetcherSource=source}}
             GetTileIndex addr -> do
               tileIndex <- readVRam addr bus
               return ppu{mode=mode{fetcher=FetchBackground False (GetTileDataLowAddress mode.backgroundFetcherSource tileIndex)}}
             GetTileDataLowAddress source tileIndex -> do
-              addr <- readBgTileRowBaseAddressForSource source tileIndex mode.windowLine ppu.y bus
+              addr <- readBgTileRowBaseAddressForSource source tileIndex mode.windowLine bus
               return ppu{mode=mode{fetcher=FetchBackground False (GetTileDataLow addr source tileIndex)}}
             GetTileDataLow addr source tileIndex -> do
               low <- readVRam addr bus
               return ppu{mode=mode{fetcher=FetchBackground False (GetTileDataHighAddress source tileIndex low)}}
             GetTileDataHighAddress source tileIndex low -> do
-              addr <- readBgTileRowBaseAddressForSource source tileIndex mode.windowLine ppu.y bus
+              addr <- readBgTileRowBaseAddressForSource source tileIndex mode.windowLine bus
               return ppu{mode=mode{fetcher=FetchBackground False (GetTileDataHigh (addr + 1) low)}}
             GetTileDataHigh addr low -> do
               high <- readVRam addr bus
@@ -401,7 +404,8 @@ step ppu = do
         objectDataAddr :: SelectedOAMObject -> OAMObjectAttributes -> IO Address
         objectDataAddr selected attr = do
           height <- readLcdCObjSize bus
-          let row = yFlipRow attr height $ fromIntegral ppu.y - selected.position.yPos + 16
+          ly <- readLY bus
+          let row = yFlipRow attr height $ fromIntegral ly - selected.position.yPos + 16
           let tileIndex = if height == 16 then attr.tileIndex .&. 0xFE else attr.tileIndex
           return $ fromIntegral $ 0x8000 + fromIntegral tileIndex * 16 + row * 2
           where
@@ -475,17 +479,19 @@ updateYTriggered :: PPU -> IO PPU
 updateYTriggered ppu =
   if ppu.x == 0 then do
     wy <- readWY ppu.bus
-    return $ if ppu.y == wy then ppu{windowYTriggered=True} else ppu
+    ly <- readLY ppu.bus
+    return $ if ly == wy then ppu{windowYTriggered=True} else ppu
   else
     return ppu
 
-advanceXY :: PPU -> PPU
+advanceXY :: PPU -> IO PPU
 advanceXY ppu
-  | ppu.x == 455 =
-    let y = if ppu.y == 153 then 0 else ppu.y + 1
-        mode = if y < 144 then OAMScan mempty Nothing else VerticalBlank
-    in ppu{x=0, y=y, mode=mode}
-  | otherwise = ppu{x=ppu.x+1}
+  | ppu.x == 455 = do
+    ly <- advanceLY ppu.bus
+    let mode = if ly < 144 then initOAMScan else VerticalBlank
+    when (ly == 144) $ writeIF VBlank True ppu.bus
+    return ppu{x=0, mode=mode}
+  | otherwise = return ppu{x=ppu.x+1}
 
 tileIndexAddr :: Address -> Word8 -> Word8 -> Address
 tileIndexAddr base y x =
@@ -507,23 +513,14 @@ readWindowTileIndexAddr windowLine x bus = do
   base <- readLcdCWindowTileMapArea bus
   return $ tileIndexAddr base windowLine x
 
-readBgTileRowBaseAddressForSource :: BackgroundFetcherSource -> TileIndex -> Word8 -> Word8 -> Bus -> IO Address
-readBgTileRowBaseAddressForSource source tileIndex windowLine y bus =
+readBgTileRowBaseAddressForSource :: BackgroundFetcherSource -> TileIndex -> Word8 -> Bus -> IO Address
+readBgTileRowBaseAddressForSource source tileIndex windowLine bus =
   case source of
     Window -> readBgTileRowBaseAddress tileIndex windowLine bus
     Background -> do
       scy <- readSCY bus
-      readBgTileRowBaseAddress tileIndex (scy + y) bus
-
-syncPPUToBus :: PPU -> PPU -> IO ()
-syncPPUToBus oldPPU ppu = do
-  -- Synchronizing LY/mode also updates the shared STAT interrupt line.
-  syncPPU ppu.y (toIntMode ppu.mode) ppu.bus
-  -- use if instead
-  when (oldPPU.mode /= ppu.mode) $
-    case ppu.mode of
-      VerticalBlank -> writeIF VBlank True ppu.bus
-      _ -> return ()
+      ly <- readLY bus
+      readBgTileRowBaseAddress tileIndex (scy + ly) bus
 
 isVBlankMode :: PPU -> Bool
 isVBlankMode PPU{mode=VerticalBlank} = True
@@ -536,12 +533,12 @@ execute duration ppu = do
   isOn <- isLcdOn ppu.bus
   case (wasOn, isOn) of
     (False, True) -> execute duration ppu{lcdOn=True, mode=initOAMScan}
-    (True,  False) -> do
-      syncPPU 0 0 ppu.bus
-      return ppu{y=0, x=0, lcdOn=False, windowYTriggered=False, windowLine=0}
+    (True,  False) ->
+      return ppu{x=0, mode=HorizontalBlank, lcdOn=False, windowYTriggered=False, windowLine=0}
     (False, False) -> return ppu
     (True, True) -> do
       ppu1 <- step ppu
-      let ppu2 = advanceXY ppu1
-      syncPPUToBus ppu ppu2
+      when (toIntMode ppu.mode /= toIntMode ppu1.mode) $
+        writePPUMode (toIntMode ppu1.mode) ppu.bus
+      ppu2 <- advanceXY ppu1
       execute (duration - 1) ppu2

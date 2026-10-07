@@ -2,7 +2,7 @@
 
 module PPUSpec (spec) where
 
-import Bus (Bus (..), readByte, writeByte, syncPPU, initBus)
+import Bus (Bus (..), readByte, writeByte, readLY, writeLY, writePPUMode, initBus)
 import CPU (CPU (..))
 import qualified CPU
 import Codec.Picture
@@ -29,17 +29,36 @@ spec = describe "PPU" $ do
     it "requests each enabled mode interrupt only on a rising edge" $
       mapM_ (\(mode, enabled) -> do
         bus <- statTestBus
-        syncPPU 5 3 bus
+        writeLY 5 bus
+        writePPUMode 3 bus
         writeByte 0xFF41 enabled bus
-        syncPPU 5 mode bus
+        writePPUMode mode bus
         readByte 0xFF0F bus `shouldReturn` 0x02
         writeByte 0xFF0F 0 bus
-        syncPPU 5 mode bus
+        writePPUMode mode bus
         readByte 0xFF0F bus `shouldReturn` 0
-        syncPPU 5 3 bus
-        syncPPU 5 mode bus
+        writePPUMode 3 bus
+        writePPUMode mode bus
         readByte 0xFF0F bus `shouldReturn` 0x02
         ) [(0, 0x08), (1, 0x10), (2, 0x20)]
+    it "preserves LY, coincidence and STAT enables when the mode changes" $ do
+      bus <- statTestBus
+      writeByte 0xFF45 5 bus
+      writeLY 5 bus
+      writeByte 0xFF41 0x78 bus
+      writePPUMode 3 bus
+      readLY bus `shouldReturn` 5
+      readByte 0xFF41 bus `shouldReturn` 0x7F
+      writePPUMode 0 bus
+      readByte 0xFF41 bus `shouldReturn` 0x7C
+    it "updates STAT when the PPU enters drawing and HBlank" $ do
+      bus <- statTestBus
+      ppu <- PPU.execute 79 (PPU.initPPU bus)
+      readByte 0xFF41 bus `shouldReturn` 0x06
+      ppu' <- PPU.execute 1 ppu
+      readByte 0xFF41 bus `shouldReturn` 0x07
+      _ <- PPU.execute 255 ppu'
+      readByte 0xFF41 bus `shouldReturn` 0x04
     it "requests LYC coincidence at the beginning of the matching scanline" $ do
       bus <- statTestBus
       writeByte 0xFF45 1 bus
@@ -53,22 +72,65 @@ spec = describe "PPU" $ do
       writeByte 0xFF0F 0 bus
       _ <- PPU.execute 4 ppu'
       readByte 0xFF0F bus `shouldReturn` 0
-    it "blocks another source while the shared STAT line stays high" $ do
+    it "updates coincidence and its interrupt when LY is written by the PPU" $ do
       bus <- statTestBus
-      syncPPU 5 3 bus
-      writeByte 0xFF41 0x18 bus
-      syncPPU 5 0 bus
+      writeByte 0xFF45 1 bus
+      writeByte 0xFF41 0x40 bus
+      writeByte 0xFF0F 0x05 bus
+      writeLY 1 bus
+      readLY bus `shouldReturn` 1
+      readByte 0xFF41 bus `shouldReturn` 0x46
+      readByte 0xFF0F bus `shouldReturn` 0x07
+      writeByte 0xFF0F 0 bus
+      writeLY 1 bus
+      readByte 0xFF0F bus `shouldReturn` 0
+      writeLY 2 bus
+      readByte 0xFF41 bus `shouldReturn` 0x42
+      writeLY 1 bus
+      readByte 0xFF0F bus `shouldReturn` 0x02
+      writeByte 0xFF44 9 bus
+      readLY bus `shouldReturn` 1
+    it "keeps STAT high when coincidence hands off to mode 2 at a scanline boundary" $ do
+      bus <- statTestBus
+      writeByte 0xFF45 0 bus
+      writeByte 0xFF41 0x60 bus
+      ppu <- PPU.execute 255 (PPU.initPPU bus) >>= PPU.execute 200
+      readLY bus `shouldReturn` 0
+      writeByte 0xFF0F 0 bus
+      _ <- PPU.execute 1 ppu
+      readLY bus `shouldReturn` 1
+      readByte 0xFF41 bus `shouldReturn` 0x62
+      readByte 0xFF0F bus `shouldReturn` 0
+    it "keeps STAT high when HBlank hands off to coincidence at a scanline boundary" $ do
+      bus <- statTestBus
+      writeByte 0xFF45 1 bus
+      writeByte 0xFF41 0x48 bus
+      ppu <- PPU.execute 255 (PPU.initPPU bus) >>= PPU.execute 200
+      readLY bus `shouldReturn` 0
       readByte 0xFF0F bus `shouldReturn` 0x02
       writeByte 0xFF0F 0 bus
-      syncPPU 5 1 bus
+      _ <- PPU.execute 1 ppu
+      readLY bus `shouldReturn` 1
+      readByte 0xFF41 bus `shouldReturn` 0x4E
       readByte 0xFF0F bus `shouldReturn` 0
-      syncPPU 5 3 bus
-      syncPPU 5 1 bus
+    it "blocks another source while the shared STAT line stays high" $ do
+      bus <- statTestBus
+      writeLY 5 bus
+      writePPUMode 3 bus
+      writeByte 0xFF41 0x18 bus
+      writePPUMode 0 bus
+      readByte 0xFF0F bus `shouldReturn` 0x02
+      writeByte 0xFF0F 0 bus
+      writePPUMode 1 bus
+      readByte 0xFF0F bus `shouldReturn` 0
+      writePPUMode 3 bus
+      writePPUMode 1 bus
       readByte 0xFF0F bus `shouldReturn` 0x02
     it "reacts immediately to STAT and LYC writes and preserves other IF bits" $ do
       bus <- statTestBus
       writeByte 0xFF45 5 bus
-      syncPPU 5 3 bus
+      writeLY 5 bus
+      writePPUMode 3 bus
       writeByte 0xFF0F 0x05 bus
       writeByte 0xFF41 0x40 bus
       readByte 0xFF0F bus `shouldReturn` 0x07

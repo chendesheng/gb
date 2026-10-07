@@ -37,7 +37,7 @@ module Bus
     readWX,
     readWXInt,
     readVRam,
-    syncPPU,
+    writePPUMode,
     OAMObjectPosition(..),
     OAMObjectAttributes(..),
     readOAMPosition,
@@ -57,6 +57,9 @@ module Bus
     resetDIV,
     increaseTimer,
     executeDMACopy,
+    readLY,
+    writeLY,
+    advanceLY,
   )
 where
 
@@ -263,10 +266,9 @@ writeByteRaw addr val bus
           updateSTATInterrupt bus $ do
             wasOn <- isLcdOn bus
             writeRam 0x40 val bus.io
-            if not (val `testBit` 7) then
-              syncPPURegisters 0 0 bus
-            else
-              unless wasOn $ syncPPURegisters 0 2 bus
+            when (not (val `testBit` 7) || not wasOn) $ do
+              writeLYRegisters 0 bus
+              writePPUModeRegisters (if val `testBit` 7 then 2 else 0) bus
       | 0xFF41 == addr = do
           updateSTATInterrupt bus $ do
             -- the lower 3 bits are readonly
@@ -279,13 +281,9 @@ writeByteRaw addr val bus
       | 0xFF44 == addr = return () -- LY is readonly
       | 0xFF45 == addr = do -- LY compare
           updateSTATInterrupt bus $ do
-            ly <- readLcdY bus
-            status <- readRam 0x41 bus.io
             writeRam 0x45 val bus.io
-            if ly == val then do
-              writeRam 0x41 (status `setBit` 2) bus.io
-            else
-              writeRam 0x41 (status `clearBit` 2) bus.io
+            ly <- readLY bus
+            updateLYCoincidence ly bus
       | 0xFF46 == addr = do
         writeRam 0x46 val bus.io
         writeIORef bus.dma DMAStart
@@ -407,9 +405,6 @@ isLcdCObjEnable = readLcdC 1
 isLcdCBgEnable :: Bus -> IO Bool
 isLcdCBgEnable = readLcdC 0
 
-readLcdY :: Bus -> IO Word8
-readLcdY bus = readRam 0x44 bus.io
-
 readLcdYC :: Bus -> IO Word8
 readLcdYC bus = readRam 0x45 bus.io
 
@@ -420,6 +415,37 @@ readLcdStatus :: Int -> Bus -> IO Bool
 readLcdStatus index bus = do
   b <- readRam 0x41 bus.io
   return $ (b .>>. index .&. 0x01) == 1
+
+readLY :: Bus -> IO Word8
+readLY bus = readRam 0x44 bus.io
+
+writeLY :: Word8 -> Bus -> IO ()
+writeLY val bus = updateSTATInterrupt bus $ writeLYRegisters val bus
+
+-- LY and mode change together at a scanline boundary. Compare STAT only
+-- after both updates, so one active source handing off to another stays high.
+advanceLY :: Bus -> IO Word8
+advanceLY bus = do
+  ly <- readLY bus
+  let ly' = if ly == 153 then 0 else ly + 1
+      mode = if ly' < 144 then 2 else 1
+  updateSTATInterrupt bus $ do
+    writeLYRegisters ly' bus
+    oldMode <- readPPUMode bus.io
+    when (oldMode /= mode) $ writePPUModeRegisters mode bus
+  return ly'
+
+writeLYRegisters :: Word8 -> Bus -> IO ()
+writeLYRegisters val bus = do
+  writeRam 0x44 val bus.io
+  updateLYCoincidence val bus
+
+updateLYCoincidence :: Word8 -> Bus -> IO ()
+updateLYCoincidence ly bus = do
+  lyc <- readLcdYC bus
+  status <- readRam 0x41 bus.io
+  let status' = if ly == lyc then status `setBit` 2 else status `clearBit` 2
+  writeRam 0x41 status' bus.io
 
 readLYCIntSelect :: Bus -> IO Bool
 readLYCIntSelect = readLcdStatus 6
@@ -464,20 +490,13 @@ readWX bus = readRam 0x4B bus.io
 readWXInt :: Bus -> IO Int
 readWXInt bus = fromIntegral <$> readWX bus
 
--- in order make PPU state readable by CPU from Bus
-syncPPU :: Word8 -> Word8 -> Bus -> IO ()
-syncPPU ly mode bus = updateSTATInterrupt bus $ syncPPURegisters ly mode bus
+writePPUMode :: Word8 -> Bus -> IO ()
+writePPUMode mode bus = updateSTATInterrupt bus $ writePPUModeRegisters mode bus
 
--- LCDC writes update LY/mode as part of the same STAT edge comparison.
-syncPPURegisters :: Word8 -> Word8 -> Bus -> IO ()
-syncPPURegisters ly mode bus = do
-  -- TODO: there are other things need update
-  writeRam 0x44 ly bus.io
-  lyc <- readRam 0x45 bus.io
-
+writePPUModeRegisters :: Word8 -> Bus -> IO ()
+writePPUModeRegisters mode bus = do
   status <- readRam 0x41 bus.io
-  let status' = if ly == lyc then status `setBit` 2 else status `clearBit` 2
-  writeRam 0x41 (status' .&. 0xFC .|. mode) bus.io
+  writeRam 0x41 (status .&. 0xFC .|. (mode .&. 0x03)) bus.io
 
 readSTATInterruptLine :: Bus -> IO Bool
 readSTATInterruptLine bus = do

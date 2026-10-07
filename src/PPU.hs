@@ -1,13 +1,15 @@
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 {-# LANGUAGE BangPatterns #-}
 {-# OPTIONS_GHC -Wno-incomplete-record-updates #-}
-module PPU (execute, FIFOPixel(..), PPU(..), Display(..), initPPU, isVBlankMode) where
+module PPU (execute, FIFOPixel(..), PPU(..), Display(..), initPPU, snapshotDisplay, isVBlankMode) where
 
 import Control.Monad (when)
 import Bus
 import Color
-import Data.Vector (Vector, (//), (!))
+import Data.Vector (Vector)
 import qualified Data.Vector as Vector
+import qualified Data.Vector.Unboxed as UV
+import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Vector.Algorithms.Intro (sort)
 import Data.Word
 import qualified Deque.Lazy as Dq
@@ -19,20 +21,21 @@ import GHC.Exts (fromList)
 
 -- One dot = one PPU clock. One scanline = 456 dots. One frame = 154 lines = 70224 dots.
 
--- 160*144
-newtype Display = Display (Vector (Vector Color))
+-- Immutable frame snapshots for the UI. Each byte stores a Color enum (0..3)
+-- at y * 160 + x; the PPU owns a separate mutable buffer with the same layout.
+newtype Display = Display (UV.Vector Word8)
 
-initDisplay :: Display
-initDisplay = Display (Vector.replicate 144 (Vector.replicate 160 Blank))
+initDisplay :: IO (MV.IOVector Word8)
+initDisplay = MV.replicate (160 * 144) (fromIntegral $ fromEnum Blank)
 
-renderPixel :: Word8 -> Int -> Color -> Display -> Display
-renderPixel y x !color (Display rows) =
-  let y' = fromIntegral y
-      row = rows ! y'
-      x' = fromIntegral x
-      !row' = row // [(x', color)]
-      !res = Display $ rows // [(y', row')]
-  in res
+renderPixel :: Word8 -> Int -> Color -> MV.IOVector Word8 -> IO ()
+renderPixel y x color pixels =
+  MV.write pixels (fromIntegral y * 160 + x) (fromIntegral $ fromEnum color)
+
+snapshotDisplay :: PPU -> IO Display
+-- Copy rather than unsafeFreeze: the worker will reuse the mutable buffer
+-- while the UI may still be reading a previously published frame.
+snapshotDisplay ppu = Display <$> UV.freeze ppu.display
 
 data FIFOPixel = FIFOPixel
   { color :: ColorIndex -- 0 - 3
@@ -47,7 +50,7 @@ zeroPixel = FIFOPixel ID0 False False
 
 instance Show Display where
   show (Display pixels) =
-    let rows = chunksOf 2 $ fmap toList (toList pixels)
+    let rows = chunksOf 2 $ chunksOf 160 $ map (toEnum . fromIntegral) (UV.toList pixels)
     in
     unlines (fmap showRow rows)
     where
@@ -74,7 +77,7 @@ data PPU = PPU
   { x :: Word16
   , mode :: PPUMode
   , lcdOn :: Bool
-  , display :: !Display
+  , display :: !(MV.IOVector Word8)
   , windowLine :: Word8
   , windowYTriggered :: Bool -- the "Y condition"
   , bus :: Bus
@@ -94,8 +97,10 @@ instance Ord SelectedOAMObject where
       EQ -> compare a.oamIndex b.oamIndex
       others -> others
 
-initPPU :: Bus -> PPU
-initPPU = PPU 0 HorizontalBlank False initDisplay 0 False
+initPPU :: Bus -> IO PPU
+initPPU bus = do
+  display <- initDisplay
+  return $ PPU 0 HorizontalBlank False display 0 False bus
 
 -- newtype Tile = Tile (Vector Word8) -- length 16
 
@@ -302,15 +307,15 @@ step ppu = do
                 let objPixel' = if objEnable then objPixel else zeroPixel
                 color <- pixelColor bgPixel' objPixel'
                 ly <- readLY bus
+                renderPixel ly screenX color ppu.display
                 return ppu{ mode=mode{screenX=screenX+1, backgroundQueue=backgroundQueue, oamQueue=oamQueue}
-                          , display=renderPixel ly screenX color ppu.display
                           }
               (Just (pixel, backgroundQueue), Nothing) -> do
                 let pixel' = if bgEnable then pixel else zeroPixel
                 color <- bgPixelColor pixel'
                 ly <- readLY bus
+                renderPixel ly screenX color ppu.display
                 return ppu{ mode=mode{screenX=screenX+1, backgroundQueue=backgroundQueue}
-                          , display=renderPixel ly screenX color ppu.display
                           }
               _ -> return ppu
         render ppu _ _ _ = return ppu

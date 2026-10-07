@@ -12,7 +12,7 @@ import Data.Char (toLower)
 import Data.Bits (clearBit, setBit, testBit)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, writeIORef)
 import Data.Maybe (isJust)
-import qualified Data.Vector as V
+import qualified Data.Vector.Unboxed as V
 import Data.Word (Word8)
 import Emulator (Emulator, EmulatorWorker, powerOn, runInBackground, stopWorker, nextWorkerError, nextDisplay, trySetJoypadKey)
 import Foreign.Marshal.Array (withArray)
@@ -219,8 +219,8 @@ checkWorkerError assets state = case state.emulator of
   _ -> pure state
 
 updateLCD :: Texture -> Display -> IO ()
-updateLCD texture (Display rows) =
-  withArray (map lcdColor $ concatMap V.toList $ V.toList rows) $ \pixels ->
+updateLCD texture (Display frame) =
+  withArray (map (lcdColor . toEnum . fromIntegral) $ V.toList frame) $ \pixels ->
     updateTexture texture (castPtr pixels)
   where
     lcdColor GB.Blank = Color 224 236 200 255

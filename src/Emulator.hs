@@ -39,7 +39,7 @@ powerOn :: ByteString -> ByteString -> IO Emulator
 powerOn boot cartridge = do
   bus <- initBus boot cartridge
   let cpu = initCPU bus
-  let ppu = initPPU cpu.bus
+  ppu <- initPPU cpu.bus
   inputQueue <- atomically $ newTBQueue 2
   outputQueue <- atomically $ newTBQueue 2
   Emulator cpu ppu inputQueue outputQueue <$> newEmptyTMVarIO
@@ -77,7 +77,7 @@ advanceFrame emulator = do
     let vblank = PPU.isVBlankMode emulator.ppu
     ppu' <- PPU.execute  (cycles * 4) emulator.ppu
 
-    when (not vblank && PPU.isVBlankMode ppu') $ presentDisplay emulator
+    when (not vblank && PPU.isVBlankMode ppu') $ presentDisplay emulator{ppu=ppu'}
     consumeEvent emulator
 
     let emulator' = emulator{cpu=cpu', ppu=ppu'}
@@ -88,8 +88,9 @@ advanceFrame emulator = do
   where
 
     presentDisplay :: Emulator -> IO ()
-    presentDisplay em =
-      atomically $ writeTBQueue em.outputQueue em.ppu.display
+    presentDisplay em = do
+      frame <- PPU.snapshotDisplay em.ppu
+      atomically $ writeTBQueue em.outputQueue frame
 
     consumeEvent :: Emulator -> IO ()
     consumeEvent em = do

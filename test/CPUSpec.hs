@@ -167,9 +167,9 @@ spec = describe "CPU" $ do
     cpu3.ime `shouldBe` cpu.ime
   it "execute boot rom" $ do
     cpu <- testCPU
-    let ppu = initPPU cpu.bus
+    ppu <- initPPU cpu.bus
     (cpu1, ppu1) <- execute isBooted cpu ppu
-    print ppu1.display
+    PPU.snapshotDisplay ppu1 >>= print
     cpu1.registers
       `shouldBe` Registers
         { rA = 0x01,

@@ -13,7 +13,7 @@ import Control.Exception (ErrorCall, catch)
 import Control.Monad (unless)
 import qualified Data.ByteString.Lazy as BL
 import Data.Maybe (isNothing)
-import qualified Data.Vector as Vector
+import qualified Data.Vector.Unboxed as Vector
 import qualified Data.Vector.Unboxed.Mutable as Mutable
 import Data.Word (Word8)
 import Numeric (showHex)
@@ -25,6 +25,22 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "PPU" $ do
+  it "keeps frame snapshots independent of later framebuffer writes" $ do
+    bus <- statTestBus
+    ppu <- PPU.initPPU bus
+    other <- PPU.initPPU bus
+    PPU.Display blank <- PPU.snapshotDisplay ppu
+    Vector.length blank `shouldBe` (160 * 144)
+    Vector.all (== 0) blank `shouldBe` True
+    Mutable.write ppu.display 0 3
+    Mutable.write ppu.display (160 * 144 - 1) 1
+    PPU.Display frame <- PPU.snapshotDisplay ppu
+    Mutable.set ppu.display 2
+    frame Vector.! 0 `shouldBe` 3
+    frame Vector.! (160 * 144 - 1) `shouldBe` 1
+    blank Vector.! 0 `shouldBe` 0
+    PPU.Display independent <- PPU.snapshotDisplay other
+    Vector.all (== 0) independent `shouldBe` True
   describe "STAT interrupts" $ do
     it "requests each enabled mode interrupt only on a rising edge" $
       mapM_ (\(mode, enabled) -> do
@@ -53,7 +69,7 @@ spec = describe "PPU" $ do
       readByte 0xFF41 bus `shouldReturn` 0x7C
     it "updates STAT when the PPU enters drawing and HBlank" $ do
       bus <- statTestBus
-      ppu <- PPU.execute 79 (PPU.initPPU bus)
+      ppu <- PPU.initPPU bus >>= PPU.execute 79
       readByte 0xFF41 bus `shouldReturn` 0x06
       ppu' <- PPU.execute 1 ppu
       readByte 0xFF41 bus `shouldReturn` 0x07
@@ -63,7 +79,7 @@ spec = describe "PPU" $ do
       bus <- statTestBus
       writeByte 0xFF45 1 bus
       writeByte 0xFF41 0x40 bus
-      ppu <- PPU.execute 255 (PPU.initPPU bus) >>= PPU.execute 200
+      ppu <- PPU.initPPU bus >>= PPU.execute 255 >>= PPU.execute 200
       readByte 0xFF44 bus `shouldReturn` 0
       readByte 0xFF0F bus `shouldReturn` 0
       ppu' <- PPU.execute 1 ppu
@@ -94,7 +110,7 @@ spec = describe "PPU" $ do
       bus <- statTestBus
       writeByte 0xFF45 0 bus
       writeByte 0xFF41 0x60 bus
-      ppu <- PPU.execute 255 (PPU.initPPU bus) >>= PPU.execute 200
+      ppu <- PPU.initPPU bus >>= PPU.execute 255 >>= PPU.execute 200
       readLY bus `shouldReturn` 0
       writeByte 0xFF0F 0 bus
       _ <- PPU.execute 1 ppu
@@ -105,7 +121,7 @@ spec = describe "PPU" $ do
       bus <- statTestBus
       writeByte 0xFF45 1 bus
       writeByte 0xFF41 0x48 bus
-      ppu <- PPU.execute 255 (PPU.initPPU bus) >>= PPU.execute 200
+      ppu <- PPU.initPPU bus >>= PPU.execute 255 >>= PPU.execute 200
       readLY bus `shouldReturn` 0
       readByte 0xFF0F bus `shouldReturn` 0x02
       writeByte 0xFF0F 0 bus
@@ -200,7 +216,7 @@ initPostBootCPU rom = do
     }}
 
 runAcid2 :: CPU.CPU -> IO PPU.PPU
-runAcid2 cpu = go (20 * 70224) 2000000 cpu (PPU.initPPU cpu.bus)
+runAcid2 cpu = PPU.initPPU cpu.bus >>= go (20 * 70224) 2000000 cpu
   where
     go :: Int -> Int -> CPU.CPU -> PPU.PPU -> IO PPU.PPU
     go !remaining !steps !cpu !ppu = do
@@ -229,8 +245,8 @@ runAcid2 cpu = go (20 * 70224) 2000000 cpu (PPU.initPPU cpu.bus)
 
 compareFrame :: Image PixelRGB8 -> PPU.PPU -> Expectation
 compareFrame reference ppu = do
-  let actual = frameImage ppu
-      differences =
+  actual <- frameImage ppu
+  let differences =
         [ (x, y, pixelAt reference x y, pixelAt actual x y)
         | y <- [0 .. 143], x <- [0 .. 159]
         , pixelAt reference x y /= pixelAt actual x y
@@ -247,12 +263,12 @@ actualPath = "dist-newstyle/ppu-test/dmg-acid2-actual.png"
 saveActualFrame :: PPU.PPU -> IO ()
 saveActualFrame ppu = do
   createDirectoryIfMissing True "dist-newstyle/ppu-test"
-  writePng actualPath (frameImage ppu)
+  frameImage ppu >>= writePng actualPath
 
-frameImage :: PPU.PPU -> Image PixelRGB8
-frameImage ppu =
-  let PPU.Display rows = ppu.display
-  in generateImage (\x y -> toRGB (rows Vector.! y Vector.! x)) 160 144
+frameImage :: PPU.PPU -> IO (Image PixelRGB8)
+frameImage ppu = do
+  PPU.Display pixels <- PPU.snapshotDisplay ppu
+  pure $ generateImage (\x y -> toRGB (toEnum $ fromIntegral $ pixels Vector.! (y * 160 + x))) 160 144
   where
     toRGB color = let value = grayscale color in PixelRGB8 value value value
     grayscale Blank = 0xFF

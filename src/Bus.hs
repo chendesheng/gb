@@ -66,7 +66,7 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Vector.Unboxed (Vector, (!))
 import qualified Data.Vector.Unboxed as V
 import qualified Data.Vector.Unboxed.Mutable as MV
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef, modifyIORef')
 import Data.Word
 import Instruction (Instruction, instructionDecoder)
 import Registers
@@ -640,9 +640,9 @@ increaseTimer 0 _ = return ()
 increaseTimer n bus = do
   triggerTimaOverflow bus
 
-  detectFallingEdge (\bus' -> do
-    counter <- readIORef bus'.systemCounter
-    writeIORef bus'.systemCounter $ counter + 1) bus
+  -- DIV keeps ticking while TIMA is disabled; force each increment so the
+  -- counter cannot accumulate a chain of unevaluated additions.
+  detectFallingEdge (\bus' -> modifyIORef' bus'.systemCounter (+ 1)) bus
 
   increaseTimer (n - 1) bus
 
